@@ -28,6 +28,16 @@ export const TOOLS_COMERCIO = declararTools([
     pacotes: ["vender", "atender"],
   },
   {
+    name: "crm_search_vehicles",
+    category: "read",
+    rotulo: "Procurar veículo no estoque",
+    explicacao:
+      "Procura veículos no estoque real do site (marca, modelo, ano, km, preço, cor, opcionais), para o assistente responder com o dado real em vez de estimar.",
+    oQueToca: "Estoque de veículos",
+    risco: "seguro",
+    pacotes: ["vender", "atender"],
+  },
+  {
     name: "crm_list_privacy_requests",
     category: "read",
     rotulo: "Ver pedidos de privacidade",

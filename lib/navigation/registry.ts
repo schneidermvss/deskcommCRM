@@ -22,6 +22,7 @@ import {
   Lightbulb,
   ListChecks,
   Lock,
+  MagnifyingGlass,
   Palette,
   Plugs,
   PlugsConnected,
@@ -205,6 +206,19 @@ export const NAV_DESTINATIONS: NavDestination[] = [
     icon: Funnel,
     group: "crm",
     minRole: "manager",
+    sidebar: true,
+  },
+  {
+    // Painel interno da AETRIX (não é feature do produto DeskcommCRM em si):
+    // agentes, comandos e resultados do squad Opensquad, sincronizados por um
+    // processo local via POST /api/v1/prospeccao/sync (token com escopo
+    // `prospeccao:write`).
+    href: "/app/prospeccao",
+    label: "Prospecção",
+    description: "Squad Opensquad — agentes, comandos e execuções de prospecção de leads.",
+    icon: MagnifyingGlass,
+    group: "crm",
+    minRole: "admin",
     sidebar: true,
   },
 

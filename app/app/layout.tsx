@@ -39,15 +39,59 @@ export default async function AppLayout({ children }: { children: React.ReactNod
    */
   let cssDaOrganizacao: string | null = null;
 
+  const store = await cookies();
+  const collapsed = store.get("sidebar_collapsed")?.value === "1";
+  const impCookie = store.get(IMPERSONATE_COOKIE_NAME)?.value;
+  const impResult = impCookie ? verifyImpersonateCookie(impCookie) : null;
+
+  /**
+   * As cinco consultas abaixo NÃO dependem uma da outra — cada uma só precisa
+   * do `user`/`activeOrg` já resolvidos acima — mas rodavam em série, uma
+   * `await` por vez. Numa VPS fora da região do banco (medido: EUA↔São Paulo,
+   * ~250-500ms por ida), seis-oito idas sequenciais é exatamente o que
+   * empurrava `/app` para os ~2-3s onde o navegador cancela a requisição — o
+   * "reading: context canceled" que aparece como 502 no Caddy. `Promise.all`
+   * troca a SOMA das latências pela MAIOR delas.
+   *
+   * O gate de onboarding/suspensão (que olha `orgRow`) continua rodando DEPOIS
+   * do `Promise.all`, não dentro dele: nas duas rotas de redirect o trabalho
+   * das outras quatro consultas é descartado, e está certo que seja — é o
+   * preço aceito por não startar um `Promise.all` condicional a um `if` que
+   * ainda não sabemos se vai redirecionar.
+   */
+  const admin = createAdminClient();
+  const [
+    { data: orgRow },
+    conexoesCaidas,
+    enrolled,
+    needsMfaGate,
+    impOrgRow,
+  ] = await Promise.all([
+    activeOrg
+      ? admin
+          .from("organizations")
+          .select("onboarded_at, status, settings")
+          .eq("id", activeOrg.orgId)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+    activeOrg ? listarConexoesCaidas(admin, activeOrg.orgId) : Promise.resolve([] as ConexaoCaida[]),
+    isMfaEnrolled(),
+    // Usa o `activeOrg` JÁ resolvido (antes do bloco abaixo mutá-lo com
+    // `visibility_mode`/`marca`) — `role`, o único campo que `requiresMfa` lê
+    // dele, não muda naquele bloco, então adiantar esta chamada é seguro.
+    requiresMfa(activeOrg?.role, user.is_platform_admin, user.id, activeOrg?.orgId),
+    impResult?.valid && impResult.payload
+      ? admin
+          .from("organizations")
+          .select("display_name")
+          .eq("id", impResult.payload.tenantId)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+  ]);
+
   // EPIC-02: gate /app/* on completed onboarding.
   // EPIC-11: gate /app/* on org not being suspended (S-11.08).
   if (activeOrg) {
-    const admin = createAdminClient();
-    const { data: orgRow } = await admin
-      .from("organizations")
-      .select("onboarded_at, status, settings")
-      .eq("id", activeOrg.orgId)
-      .maybeSingle();
     if (orgRow && !orgRow.onboarded_at) redirect("/onboarding");
     if (orgRow?.status === "suspended") redirect("/account-suspended");
     // G4-02: expõe visibility_mode ao client (inbox decide visões visíveis).
@@ -108,52 +152,26 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     }
   }
 
-  // A conexão caiu? A consulta mora no seam (`lib/channels/health`), não aqui:
-  // tela que monta o select de `channel_sessions` à mão foi o que deixou três
-  // seletores oferecendo canal arquivado, e o invariante `canais-selecionaveis`
-  // existe por causa disso. De quebra, o filtro de estados fica LITERALMENTE o
-  // mesmo que decide o aviso da Central — duas listas divergiriam com o tempo.
-  const conexoesCaidas: ConexaoCaida[] = activeOrg
-    ? await listarConexoesCaidas(createAdminClient(), activeOrg.orgId)
-    : [];
-
-  // Read sidebar collapsed state SSR to avoid flash.
-  const store = await cookies();
-  const collapsed = store.get("sidebar_collapsed")?.value === "1";
+  // A conexão caiu, o MFA está inscrito e se é exigido: as três já foram
+  // buscadas no `Promise.all` lá em cima — `conexoesCaidas`, `enrolled` e
+  // `needsMfaGate` chegam aqui prontos, não é preciso mais nenhum `await`.
 
   // Impersonate (S-11.07): verify cookie server-side and resolve tenant name.
   // Middleware already validates HMAC + expiry on /app/*; we re-verify here as
-  // defence-in-depth and to extract the payload safely.
+  // defence-in-depth and to extract the payload safely. `impResult` e
+  // `impOrgRow` também já vieram do `Promise.all`.
   let impersonating: ImpersonatingInfo | null = null;
-  const impCookie = store.get(IMPERSONATE_COOKIE_NAME)?.value;
-  if (impCookie) {
-    const result = verifyImpersonateCookie(impCookie);
-    if (result.valid && result.payload) {
-      const admin = createAdminClient();
-      const { data: org } = await admin
-        .from("organizations")
-        .select("display_name")
-        .eq("id", result.payload.tenantId)
-        .maybeSingle();
-      if (org) {
-        impersonating = {
-          tenantId: result.payload.tenantId,
-          tenantName: org.display_name,
-          expiresAt: new Date(result.payload.exp * 1000).toISOString(),
-        };
-      }
+  if (impResult?.valid && impResult.payload) {
+    const org = impOrgRow.data;
+    if (org) {
+      impersonating = {
+        tenantId: impResult.payload.tenantId,
+        tenantName: org.display_name,
+        expiresAt: new Date(impResult.payload.exp * 1000).toISOString(),
+      };
     }
   }
 
-  const enrolled = await isMfaEnrolled();
-  // A decisão deixou de ser uma constante de papel: ela lê a política de quem
-  // pode exigir (a plataforma e a empresa). Ver `lib/auth/politica-mfa.ts`.
-  const needsMfaGate = await requiresMfa(
-    activeOrg?.role,
-    user.is_platform_admin,
-    user.id,
-    activeOrg?.orgId,
-  );
   const shell = <AppShell sidebarCollapsed={collapsed}>{children}</AppShell>;
 
   return (

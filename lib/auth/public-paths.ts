@@ -20,6 +20,11 @@ export const PUBLIC_PATHS: RegExp[] = [
   /^\/api\/v1\/system\/agent$/,
   /^\/api\/internal\//,
   /^\/api\/mcp(\/.*)?$/,
+  // Sync do squad Opensquad — bearer token de `api_tokens` (escopo
+  // `prospeccao:write`), checado dentro da própria rota. Sem cookie de
+  // sessão, mesma razão do /api/mcp acima: quem chama é um processo local,
+  // não um usuário logado no CRM.
+  /^\/api\/v1\/prospeccao\/sync$/,
   /^\/_next\//,
   /^\/favicon\.ico$/,
   // O ícone da aba (`app/icon.tsx`), que o `<head>` de TODA página pede —

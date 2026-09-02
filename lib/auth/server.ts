@@ -6,6 +6,7 @@
  * intentional here because we resolve the user from the validated JWT first
  * and then filter by `user_id` (a trusted source).
  */
+import { cache } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { logger } from "@/lib/logger";
@@ -58,7 +59,20 @@ export function ehSessaoAusente(error: { name?: string } | null | undefined): bo
   return error?.name === "AuthSessionMissingError";
 }
 
-export async function loadAuthUser(): Promise<AuthUser | null> {
+/**
+ * `loadAuthUser` é `cache()`-envolvida logo abaixo desta definição — chamada
+ * do middleware, do layout de `/app` e de cinco páginas diferentes, ela
+ * pagava a MESMA ida ao Supabase (getUser + duas consultas) uma vez POR
+ * CHAMADOR na mesma requisição, sem nenhum compartilhamento entre elas. Numa
+ * VPS fora da região do banco (EUA↔São Paulo, ~250-500ms por ida), essa
+ * repetição é o que empurrava `/app` para os ~2-3s onde o navegador cancela a
+ * requisição (o "reading: context canceled" que aparece como 502 no Caddy).
+ * `React.cache()` memoiza por REQUISIÇÃO (não entre requisições, e não é o
+ * memo com TTL de `lib/branding/instalacao.ts` — este some ao fim do render),
+ * então a segunda chamada e as seguintes, na mesma requisição, não tocam a
+ * rede.
+ */
+async function loadAuthUserSemCache(): Promise<AuthUser | null> {
   const supabase = await createClient();
   const {
     data: { user },
@@ -108,19 +122,30 @@ export async function loadAuthUser(): Promise<AuthUser | null> {
   // ⚠️ O erro é capturado de propósito: aqui `data: null` é AMBÍGUO — significa tanto
   // "não é platform admin" (RLS filtrou, estado normal) quanto "a query falhou".
   // Sem separar os dois, um banco instável rebaixa silenciosamente um super-admin.
-  const { data: paRow, error: paErro } = await supabase
-    .from("platform_admins")
-    .select("user_id, revoked_at")
-    .eq("user_id", user.id)
-    .is("revoked_at", null)
-    .maybeSingle();
-
-  // Org memberships (only active = not revoked, accepted)
-  const { data: rawMemberships, error: membErro } = await supabase
-    .from("user_organizations")
-    .select("organization_id, role, organizations(display_name)")
-    .eq("user_id", user.id)
-    .is("revoked_at", null);
+  //
+  // As duas consultas rodam em PARALELO (`Promise.all`): nenhuma lê o resultado
+  // da outra, e numa VPS fora da região do banco (o custo medido é EUA↔São
+  // Paulo) cada ida sequencial soma centenas de ms — a diferença entre elas
+  // rodarem em série ou juntas é o tipo de coisa que empurra `/app` para o
+  // território onde o navegador cancela a requisição (ver o 502 de
+  // "context canceled" no Caddy, correlacionado a este caminho).
+  const [
+    { data: paRow, error: paErro },
+    { data: rawMemberships, error: membErro },
+  ] = await Promise.all([
+    supabase
+      .from("platform_admins")
+      .select("user_id, revoked_at")
+      .eq("user_id", user.id)
+      .is("revoked_at", null)
+      .maybeSingle(),
+    // Org memberships (only active = not revoked, accepted)
+    supabase
+      .from("user_organizations")
+      .select("organization_id, role, organizations(display_name)")
+      .eq("user_id", user.id)
+      .is("revoked_at", null),
+  ]);
 
   /**
    * FALHA ALTO, não baixo.
@@ -179,6 +204,8 @@ export async function loadAuthUser(): Promise<AuthUser | null> {
     organizations: memberships,
   };
 }
+
+export const loadAuthUser = cache(loadAuthUserSemCache);
 
 /**
  * Resolves the active organization for the current request.
