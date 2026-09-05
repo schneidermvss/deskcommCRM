@@ -219,7 +219,8 @@ export const NAV_DESTINATIONS: NavDestination[] = [
     icon: MagnifyingGlass,
     group: "crm",
     minRole: "admin",
-    sidebar: true,
+    // SEM `sidebar`: fora do menu por decisão do dono do produto (não usa esta
+    // integração hoje). Continua no hub "Ver tudo em CRM" e no ⌘K.
   },
 
   // ---- Agente de IA — montar, ensinar, acompanhar ----
@@ -251,7 +252,8 @@ export const NAV_DESTINATIONS: NavDestination[] = [
     group: "ia",
     section: "Montar o agente",
     minRole: "manager",
-    sidebar: true,
+    // SEM `sidebar`: aparece só dentro de "Ver tudo em IA", a pedido do dono
+    // do produto.
   },
   {
     href: "/app/ai/credentials",
@@ -384,7 +386,9 @@ export const NAV_DESTINATIONS: NavDestination[] = [
     // A página não filtra por papel, mas as Server Actions de conectar e
     // desconectar exigem admin — mostrar a um viewer seria oferecer botão morto.
     minRole: "admin",
-    sidebar: true,
+    // SEM `sidebar`: fora do menu por decisão do dono do produto — não usa
+    // esta integração hoje. "canais" não tem hub, então o ⌘K é a porta que
+    // sobra (mesmo tratamento que a Nuvemshop já tinha noutras instalações).
   },
   {
     href: "/app/webhooks",
