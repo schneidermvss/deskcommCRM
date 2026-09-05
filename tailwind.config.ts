@@ -118,6 +118,19 @@ const config: Config = {
           foreground: "var(--color-text)",
         },
       },
+      // Escala de leitura — só a partir de `base`. `xs`/`sm` ficam no padrão do
+      // Tailwind de propósito: são o texto do menu lateral e das listas densas
+      // (Inbox, Kanban), testados para caber sem rolar (tests/e2e/navegacao.spec.ts
+      // mede a altura exata do sidebar). Mexer neles quebraria esse orçamento.
+      // O que se LÊ com atenção — parágrafo, título de página, mensagem do
+      // Inbox — ganha ~6-8% de corpo e mais respiro entre linhas.
+      fontSize: {
+        base: ["1.0625rem", { lineHeight: "1.65" }],
+        lg: ["1.1875rem", { lineHeight: "1.65" }],
+        xl: ["1.3125rem", { lineHeight: "1.55" }],
+        "2xl": ["1.625rem", { lineHeight: "1.35" }],
+        "3xl": ["2rem", { lineHeight: "1.25" }],
+      },
       fontFamily: {
         sans: [
           "var(--font-sans)",
