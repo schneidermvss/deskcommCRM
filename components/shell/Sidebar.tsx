@@ -3,7 +3,7 @@ import Link from "next/link";
 import { useT } from "@/hooks/i18n/useT";
 import { usePathname } from "next/navigation";
 import { useTransition } from "react";
-import { ArrowRight, CaretDoubleLeft, CaretDoubleRight, Gear } from "@/lib/ui/icons";
+import { ArrowRight, CaretDoubleLeft, CaretDoubleRight, Gear, Storefront } from "@/lib/ui/icons";
 import { cn } from "@/lib/utils";
 import { toggleSidebar } from "@/app/actions/shell/toggleSidebar";
 import { useAuth } from "@/hooks/auth/AuthProvider";
@@ -17,6 +17,17 @@ interface SidebarContentProps {
   showCollapseControl?: boolean;
   onNavigate?: () => void;
 }
+
+/**
+ * Link fixo de "Estoque" para a organização Nilson Veículos — aponta pro
+ * Sanity Studio do site dela, fora do CRM. Hardcoded por org_id de propósito:
+ * é o único cliente que precisa disso hoje, e um flag genérico em
+ * `organizations.settings` seria plumbing especulativo para um caso só.
+ * Quando um segundo cliente precisar de algo assim, isto vira campo de
+ * verdade (ex.: `settings.links_externos`).
+ */
+const NILSON_VEICULOS_ORG_ID = "cc29cde8-f2f6-4e28-9387-dbeaaf4a0f29";
+const NILSON_ESTOQUE_URL = "https://nilsonveiculos.vercel.app/studio/structure/veiculosDoEstoque";
 
 /**
  * Navegação principal, agrupada por objetivo.
@@ -175,6 +186,34 @@ export function SidebarContent({
             </div>
           );
         })}
+        {activeOrg?.orgId === NILSON_VEICULOS_ORG_ID && (
+          <div className="space-y-1">
+            {collapsed ? (
+              <div aria-hidden className="mx-2 border-t" />
+            ) : (
+              <h2 className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+                Loja
+              </h2>
+            )}
+            <ul className="space-y-1">
+              <li>
+                <a
+                  href={NILSON_ESTOQUE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={collapsed ? "Estoque" : undefined}
+                  className={cn(
+                    "flex items-center gap-3 rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground",
+                    collapsed && "justify-center px-2",
+                  )}
+                >
+                  <Storefront size={18} weight="regular" aria-hidden />
+                  {!collapsed && <span className="truncate">Estoque</span>}
+                </a>
+              </li>
+            </ul>
+          </div>
+        )}
       </nav>
       <div className="border-t p-2">
         {rodape && (
