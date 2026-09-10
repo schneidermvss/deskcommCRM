@@ -5,6 +5,24 @@
 	email {$ACME_EMAIL}
 }
 
+# Ponto de extensão para OUTROS serviços neste mesmo VPS.
+#
+# Existe porque este arquivo é versionado: quem precisa publicar um n8n, um
+# Evolution API ou qualquer outra coisa atrás deste Caddy não tem onde
+# escrever. Editar o Caddyfile direto parece resolver, mas o `update.sh` faz
+# `git checkout <tag>` — e a partir daí a atualização passa a falhar sempre
+# que a versão nova mexer neste arquivo. Falha de forma imprevisível, aliás:
+# funciona por várias versões e quebra numa.
+#
+# A pasta é ignorada pelo git e montada como DIRETÓRIO, não arquivo. A
+# diferença importa: bind mount de arquivo fica preso ao inode (ver a nota no
+# update.sh sobre isso), enquanto num diretório os arquivos criados depois são
+# vistos normalmente.
+#
+# Sem nenhum .caddy dentro, o glob não casa nada e o comportamento é idêntico
+# ao de antes.
+import /etc/caddy/conf.d/*.caddy
+
 {$DOMAIN} {
 	encode gzip
 

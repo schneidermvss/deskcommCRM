@@ -235,6 +235,10 @@ services:
       ACME_EMAIL: ${ACME_EMAIL}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Configurações de outros serviços deste VPS. Diretório, não arquivo:
+      # arquivo novo dentro de bind mount de diretório é visto na hora, sem
+      # o problema de inode que trava o Caddyfile.
+      - ./caddy-conf.d:/etc/caddy/conf.d:ro
       - caddy-data:/data           # certificados Let's Encrypt (persistir!)
       - caddy-config:/config
     depends_on:

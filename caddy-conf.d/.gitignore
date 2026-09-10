@@ -1,0 +1,3 @@
+# O conteúdo desta pasta é de cada instalação — n8n, Evolution, o que for
+# publicado atrás deste Caddy. Nada disso vai para o repositório.
+*.caddy
