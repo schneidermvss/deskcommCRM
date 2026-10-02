@@ -12,7 +12,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  COMANDOS_DO_BANCO,
   comandoDaConversa,
+  comandosDaFila,
   ROTULO_DO_COMANDO,
   ROTULO_DO_MOTIVO,
   type FatosDoComando,
@@ -110,6 +112,26 @@ describe("comandoDaConversa — o automático está ativo?", () => {
       AGORA,
     );
     expect(r.motivo).toBe("atendente_no_comando");
+  });
+
+  it("silêncio durável sem dono: pausa genérica — a ação é devolver", () => {
+    const r = comandoDaConversa(fatos({ bot_silenced_until: "infinity" }), AGORA);
+    expect(r.motivo).toBe("pausado");
+    expect(r.travaVigente).toBe(true);
+  });
+
+  it("C-075: pausa por resposta no CELULAR tem motivo próprio, e a trava é devolvível", () => {
+    const r = comandoDaConversa(
+      fatos({
+        status: "claimed",
+        bot_silenced_until: "infinity",
+        last_handoff_reason: "Atendimento manual pelo canal (resposta fora do CRM)",
+      }),
+      AGORA,
+    );
+    expect(r.motivo).toBe("atendimento_pelo_celular");
+    expect(r.travaVigente).toBe(true);
+    expect(ROTULO_DO_MOTIVO.atendimento_pelo_celular).toMatch(/#on/i);
   });
 
   it("valor ilegível falha FECHADA: trata como calado, nunca afirma que está ativo", () => {
@@ -261,11 +283,100 @@ describe("o espelho entre a tela e o motor", () => {
     expect(Object.keys(ROTULO_DO_COMANDO).sort()).toEqual(
       ["aguardando", "automatico", "encerrada", "humano", "ninguem"],
     );
-    expect(Object.keys(ROTULO_DO_MOTIVO)).toHaveLength(4);
+    // Seis desde 2026-09-24: `atendimento_pelo_celular` (C-075) entrou junto com
+    // a pausa durável por resposta no celular. O número fica escrito porque motivo
+    // novo tem de ganhar rótulo no mesmo commit — um motivo sem rótulo imprime a
+    // chave crua.
+    expect(Object.keys(ROTULO_DO_MOTIVO)).toHaveLength(6);
     // "IA" no rótulo colidiria com o léxico que o produto já fixou em quatro
     // arquivos e que `handoff-por-orcamento.test.ts` usa como sabotagem-controle.
     for (const rotulo of Object.values(ROTULO_DO_MOTIVO)) {
       expect(rotulo).not.toMatch(/\bIA\b/);
     }
+  });
+});
+
+describe("o que entrou quando o banco passou a calcular o mesmo comando", () => {
+  it("'-infinity' NÃO é silêncio — é um silêncio que já venceu", () => {
+    // Sem o ramo explícito ele caía no fallback de "data ilegível = calado", e o
+    // Postgres discorda: `'-infinity' > now()` é false. Quem grava é o banco.
+    const r = comandoDaConversa(fatos({ bot_silenced_until: "-infinity" }), AGORA);
+    expect(r.comando).toEqual({ quem: "automatico" });
+    expect(r.automaticoAtivo).toBe(true);
+  });
+
+  it("mas data ilegível de verdade CONTINUA calando — falha fechada", () => {
+    // O controle do caso acima: um conserto que tratasse toda string estranha
+    // como "sem silêncio" passaria no teste anterior e abriria o automático em
+    // cima de dado que ninguém sabe ler.
+    expect(comandoDaConversa(fatos({ bot_silenced_until: "banana" }), AGORA).automaticoAtivo).toBe(
+      false,
+    );
+    expect(comandoDaConversa(fatos({ bot_silenced_until: "infinity" }), AGORA).automaticoAtivo).toBe(
+      false,
+    );
+  });
+
+  it("'resolved' é conversa encerrada, e por isso não vai para a fila", () => {
+    const r = comandoDaConversa(fatos({ status: "resolved" }), AGORA);
+    expect(r.comando).toEqual({ quem: "encerrada" });
+    expect(r.motivo).toBeNull();
+  });
+
+  it("contato descadastrado: o automático não atende, e a tela diz o motivo certo", () => {
+    const r = comandoDaConversa(fatos({ is_blocked: true }), AGORA);
+    expect(r.comando).toEqual({ quem: "aguardando" });
+    expect(r.automaticoAtivo).toBe(false);
+    expect(r.motivo).toBe("contato_descadastrado");
+  });
+
+  it("MAS o descadastro NÃO acende 'Devolver ao automático' — seria botão decorativo", () => {
+    // `travaVigente` é o que desenha o botão. Devolver não desfaz opt-out: o
+    // `stopGate` de before-send recusa na mesma. É o defeito do PR #295.
+    expect(comandoDaConversa(fatos({ is_blocked: true }), AGORA).travaVigente).toBe(false);
+    // E ele apaga a trava mesmo quando havia outra devolvível junto.
+    const comAsDuas = comandoDaConversa(fatos({ is_blocked: true, force_human: true }), AGORA);
+    expect(comAsDuas.travaVigente).toBe(false);
+    expect(comAsDuas.motivo).toBe("contato_descadastrado");
+  });
+
+  it("o controle: force_human sozinho CONTINUA acendendo o botão", () => {
+    // Sem este caso, um conserto que zerasse `travaVigente` sempre passaria nos
+    // dois acima e esconderia a única porta de volta que existe.
+    const r = comandoDaConversa(fatos({ force_human: true }), AGORA);
+    expect(r.travaVigente).toBe(true);
+    expect(r.motivo).toBe("contato_travado");
+  });
+
+  it("a fila pede 'aguardando' — e 'automatico' também quando a org não tem robô", () => {
+    expect(comandosDaFila(true)).toEqual(["aguardando"]);
+    expect(comandosDaFila(undefined)).toEqual(["aguardando"]);
+    // Sem automático de pé, `automatico` não descreve ninguém: essas conversas
+    // estão esperando gente, e deixá-las fora faria a Fila de uma instalação
+    // nova nascer vazia com clientes sem resposta.
+    expect(comandosDaFila(false)).toEqual(["aguardando", "automatico"]);
+  });
+
+  it("o vocabulário do banco tem QUATRO — 'ninguem' é renomeação de TS, não estado", () => {
+    expect([...COMANDOS_DO_BANCO]).toEqual(["humano", "automatico", "aguardando", "encerrada"]);
+    expect(COMANDOS_DO_BANCO as readonly string[]).not.toContain("ninguem");
+  });
+});
+
+describe("comandoDaConversa — grupo de WhatsApp (I3)", () => {
+  it("grupo sem dono é da fila HUMANA ('aguardando'), nunca 'Automático atendendo'", () => {
+    const r = comandoDaConversa(fatos({ is_group: true, automaticoDaOrg: true }), AGORA);
+    expect(r.comando.quem).toBe("aguardando");
+    expect(r.automaticoAtivo).toBe(false);
+    // Nada de "Devolver ao automático" num grupo, nem motivo de automático pausado.
+    expect(r.travaVigente).toBe(false);
+    expect(r.motivo).toBeNull();
+  });
+  it("grupo com dono continua nomeando o atendente; grupo fechado continua encerrado", () => {
+    expect(comandoDaConversa(fatos({ is_group: true, assigned_to_user_id: ATENDENTE }), AGORA).comando.quem).toBe("humano");
+    expect(comandoDaConversa(fatos({ is_group: true, status: "closed" }), AGORA).comando.quem).toBe("encerrada");
+  });
+  it("controle: a mesma conversa sem ser grupo é do automático", () => {
+    expect(comandoDaConversa(fatos({ is_group: false, automaticoDaOrg: true }), AGORA).comando.quem).toBe("automatico");
   });
 });

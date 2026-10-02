@@ -1,3 +1,8 @@
+import type { InterfaceSettings } from "@/lib/navigation/interface";
+import type { Idioma } from "@/lib/i18n/idiomas";
+import type { ModuloOpcional } from "@/lib/instalacao/modulos";
+import type { CapacidadeDaOrganizacao } from "@/lib/organizacao/capacidades";
+
 /**
  * Papéis dentro do tenant.
  *
@@ -26,6 +31,40 @@ export const ROLE_RANK: Record<Role, number> = {
   admin: 5,
 };
 
+/**
+ * Compara um role (possivelmente vindo solto de uma consulta, não tipado)
+ * contra um mínimo. NÃO é gate de rota — isso é `requireRole()`
+ * (`lib/auth/require-role.ts`), o único lugar que decide 403 e aplica o gate
+ * de MFA. Este helper existe para os usos legítimos que sobram depois de uma
+ * rota já ter passado por `requireRole()`: computar um campo informativo no
+ * payload (ex.: `podeEditar`) ou uma regra de escopo adicional sobre o MESMO
+ * role já resolvido (ex.: "autor OU manager+"). Em ambos a decisão de ACESSO
+ * À ROTA já foi tomada; isto só lê o rank — nunca decide 401/403 sozinho.
+ */
+export function roleAtLeast(role: string | null | undefined, min: Role): boolean {
+  const rank = role ? (ROLE_RANK[role as Role] ?? 0) : 0;
+  return rank >= ROLE_RANK[min];
+}
+
+/**
+ * O platform admin pode ESCREVER pulando o papel do tenant?
+ *
+ * `is_platform_admin` sozinho responde "tem a linha em platform_admins" — e o
+ * `support_readonly` também tem. Todo atalho do tipo
+ * `!user.is_platform_admin && ROLE_RANK[...] < ROLE_RANK.admin` deixava o
+ * `support_readonly` que é membro comum de uma empresa escrever nela como se
+ * administrasse. Só `scope === "full"` escreve; ausente = sem escrita.
+ *
+ * Mora aqui, e não em `requirePlatformAdmin.ts`, porque é puro: as server actions
+ * que o usam já importam `ROLE_RANK` daqui e não ganham dependência de servidor.
+ * MFA não entra: quem chama já confere `mfaEmDivida` como fazia antes.
+ */
+export function escreveComoPlatformAdmin(
+  user: Pick<AuthUser, "is_platform_admin" | "platform_admin_scope">,
+): boolean {
+  return user.is_platform_admin && user.platform_admin_scope === "full";
+}
+
 /** Papéis que uma PESSOA pode ter. Espelha `user_organizations_role_check`. */
 export const PAPEIS_HUMANOS: ReadonlyArray<Role> = ["viewer", "agent", "manager", "admin"];
 
@@ -46,17 +85,59 @@ export type VisibilityMode = "all" | "own_and_unassigned" | "own";
 export const DEFAULT_VISIBILITY_MODE: VisibilityMode = "own_and_unassigned"; // G1-06a
 
 export interface UserOrgMembership {
+  interface_settings?: InterfaceSettings;
   organization_id: string;
   organization_name: string;
   role: Role;
+  /**
+   * Idioma padrão da organização (`organizations.locale`).
+   *
+   * Vem junto porque quem escolhe a organização ativa é a mesma função que
+   * precisa decidir o idioma — buscá-lo depois seria uma segunda ida ao banco
+   * para responder algo que a primeira já tinha em mãos.
+   */
+  locale?: string | null;
+  /**
+   * Fuso IANA da organização (`organizations.timezone`).
+   *
+   * Pela mesma razão do `locale` acima: quem escolhe a organização ativa é
+   * quem precisa saber em que fuso a tela desenha o calendário, e buscá-lo
+   * depois seria uma segunda ida ao banco para responder o que a primeira já
+   * trouxe. Pode vir nulo ou inutilizável — nenhum escritor valida a coluna —,
+   * então quem usa passa por `fusoValido` e cai em `FUSO_PADRAO`.
+   */
+  timezone?: string | null;
+  /**
+   * Moeda e país da organização (`organizations.currency` / `.country`).
+   *
+   * Mesma carona de `locale` e `timezone`, e pelo mesmo motivo: são as telas do
+   * negócio e do contato que precisam deles — o rótulo do valor e o documento
+   * do titular —, e sem esta carona cada diálogo cravaria `R$` e `CPF`, que foi
+   * exatamente o defeito. `country` nulo significa Brasil (`PAIS_PADRAO`).
+   */
+  currency?: string | null;
+  country?: string | null;
+  /**
+   * `organizations.status` da empresa. Quem decide se ela opera é `ehOperante`
+   * (`lib/organizacao/operante.ts`); ausente ou nulo = NÃO operante.
+   */
+  org_status?: string | null;
+  /** `organizations.suspended_kind` — só significa algo com status 'suspended'. */
+  suspended_kind?: string | null;
 }
 
 export interface AuthUser {
+  support?: import("@/lib/impersonate/support").SupportContext | null;
   id: string;
   email: string;
   full_name: string | null;
   avatar_url: string | null;
   is_platform_admin: boolean;
+  /**
+   * `platform_admins.scope` (`full` | `support_readonly`), nulo para quem não é
+   * platform admin. Escrita de platform admin exige `=== "full"`; ausente = sem escrita.
+   */
+  platform_admin_scope?: string | null;
   /**
    * Idioma da interface, de `user_metadata.locale`.
    *
@@ -65,11 +146,62 @@ export interface AuthUser {
    * e trocar para espanhol meio segundo depois, em toda navegação.
    */
   locale?: string | null;
+  /**
+   * O idioma que a interface REALMENTE usa nesta sessão — já resolvido.
+   *
+   * ─── Por que não bastava `locale` ──────────────────────────────────────
+   *
+   * `locale` é a PREFERÊNCIA de quem está logado, e ela costuma estar vazia:
+   * ninguém abre o perfil antes de usar o produto. Quando está vazia, a
+   * pergunta certa não é "português, então" — é "em que idioma esta empresa
+   * trabalha", que é `organizations.locale`.
+   *
+   * Esse campo da organização existia, tinha seletor na tela de Configurações,
+   * era gravado no banco… e NÃO ERA LIDO POR NINGUÉM. Medido por varredura: as
+   * únicas referências eram a escrita (`app/actions/settings/updateTenant.ts`)
+   * e a releitura para preencher o próprio formulário. Ou seja, exatamente o
+   * defeito que originou o i18n — um seletor que não muda uma letra —, repetido
+   * um andar acima e sem que ninguém percebesse.
+   *
+   * A ordem é: preferência da pessoa → idioma da organização → padrão do
+   * produto. É ela que faz o idioma escolhido no instalador chegar a quem
+   * entra: o `install.sh` grava na organização, e quem nunca abriu o perfil já
+   * encontra o sistema no idioma certo.
+   */
+  idioma: Idioma;
+  /**
+   * Fuso de APRESENTAÇÃO, de `user_metadata.timezone`.
+   *
+   * Vem aqui pelo mesmo motivo do `locale` acima: a grade da Agenda precisa
+   * dele no primeiro render, e buscá-lo depois desenharia o dia inteiro no
+   * fuso errado para corrigir meio segundo depois — com os compromissos
+   * pulando de posição na frente de quem está olhando.
+   *
+   * NÃO é o fuso da REGRA. Em que fuso as janelas de trabalho valem é
+   * `attendant_availability.schedule.timezone`, e são perguntas diferentes:
+   * quem está em Manaus vê a grade no horário de Manaus enquanto a jornada
+   * continua valendo no fuso em que foi configurada.
+   *
+   * Até esta linha o campo era escrito pela tela de perfil e lido por NINGUÉM —
+   * o anti-pattern "tela oferece o que o código ignora".
+   */
+  timezone?: string | null;
   organizations: UserOrgMembership[];
 }
 
 export interface ActiveOrg {
+  interface_settings?: InterfaceSettings;
+  /** Moeda da organização — o rótulo do valor do negócio sai dela. */
+  currency?: string | null;
+  /** País da organização (ISO-3166 alpha-2); nulo = Brasil. */
+  country?: string | null;
+  /** Status da org ativa (`orgAtivaSemPortao` sempre preenche). Ausente/nulo = não operante. */
+  org_status?: string | null;
+  /** Tipo da suspensão — só significa algo com status 'suspended'. */
+  suspended_kind?: string | null;
   orgId: string;
+  /** Fuso IANA da organização — ver `UserOrgMembership.timezone`. */
+  timezone?: string | null;
   name: string;
   role: Role;
   /**
@@ -78,6 +210,29 @@ export interface ActiveOrg {
    * de autorização — a RLS (fn_can_view_conversation) é quem garante o escopo.
    */
   visibility_mode?: VisibilityMode;
+  /**
+   * A regra "cliente pela agenda" está ligada nesta organização
+   * (`organizations.settings.crm.cliente_pela_agenda`, migration 0262)?
+   *
+   * Opcional pelo mesmo motivo de `visibility_mode`: só o layout de `/app`
+   * preenche, e ausente é desligado. NÃO é autorização nem é quem aplica a
+   * regra — quem decide é o banco (o trigger lê a chave). Serve para a tela não
+   * mostrar selo, data e funil de clientes de uma regra desligada, em que
+   * `first_service_at` está congelada.
+   */
+  cliente_pela_agenda?: boolean;
+  /**
+   * Os módulos opcionais LIGADOS na instalação (`lib/instalacao/modulos.ts`).
+   * É da instalação, não da organização — mora aqui porque este é o contexto
+   * que o layout de `/app` entrega à casca. Ausente vale como nenhum: a porta
+   * de módulo desligado não aparece no menu.
+   */
+  modulos_ligados?: readonly ModuloOpcional[];
+  /**
+   * Capacidades que ESTA organização ligou (`lib/organizacao/capacidades.ts`).
+   * Só o layout de `/app` preenche; ausente vale como nenhuma no menu.
+   */
+  capacidades_ligadas?: readonly CapacidadeDaOrganizacao[];
   /**
    * O que ESTA organização definiu para si — CAMPO A CAMPO, e só o que ela
    * mesma definiu.
@@ -103,5 +258,18 @@ export interface ActiveOrg {
    * banco: `app/layout.tsx` resolve a pilha e o `<PublicEnvScript/>` a injeta em
    * `window.__PUBLIC_ENV__`, de onde `branding()` a lê.
    */
-  marca?: { readonly nome?: string; readonly logoUrl?: string | null };
+  marca?: {
+    readonly nome?: string;
+    readonly logoUrl?: string | null;
+    readonly logoDarkUrl?: string | null;
+  };
+  /**
+   * Link extra no menu lateral — customização de UMA organização específica
+   * (`SIDEBAR_LINK_EXTRA_*` em `lib/env.ts`). Nunca hardcode domínio de
+   * cliente no código-fonte que embarca na imagem (ver `tests/unit/
+   * branding.test.ts`, "catraca de host de terceiro" — já foi incidente #266);
+   * o destino nasce do `.env` desta instalação, lido pelo layout de `/app` e
+   * entregue aqui, igual a `marca` acima.
+   */
+  linkExtra?: { readonly url: string; readonly label: string } | null;
 }

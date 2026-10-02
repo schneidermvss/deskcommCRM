@@ -24,15 +24,18 @@ import {
   CONDITION_TRUE_BRANCH_ID,
   FALLBACK_BRANCH_ID,
   NO_REPLY_BRANCH_ID,
+  nodeBranches,
   type FlowEdge,
   type FlowNode,
 } from "./graph-schema";
 import {
+  FRASE_DE_OUTROS_CASOS,
   RAMOS_RESERVADOS_EM_FRASE,
   fraseDaClasse,
   fraseDaRegraNomeada,
   fraseDaRegraSemNome,
   fraseDoRamo,
+  type NomesDeValor,
 } from "./vocabulario";
 
 // ---------------------------------------------------------------------------
@@ -76,8 +79,10 @@ export type TomDoStatus = "neutral" | "success" | "warning" | "error" | "info";
 const STATUS: Record<string, { rotulo: string; tom: TomDoStatus }> = {
   active: { rotulo: "Ativo", tom: "success" },
   waiting_reply: { rotulo: "Aguardando resposta", tom: "info" },
+  dormente: { rotulo: "Aguardando a data do retorno", tom: "info" },
   paused_handoff: { rotulo: "Pausado (atendimento humano)", tom: "warning" },
   paused_manual: { rotulo: "Pausado por uma pessoa", tom: "warning" },
+  coletando: { rotulo: "Coletando respostas do roteiro", tom: "info" },
   completed: { rotulo: "Concluído", tom: "neutral" },
   cancelled: { rotulo: "Cancelado", tom: "neutral" },
   dead: { rotulo: "Parou de tentar", tom: "error" },
@@ -88,8 +93,8 @@ const STATUS: Record<string, { rotulo: string; tom: TomDoStatus }> = {
   cancelada: { rotulo: "Cancelada", tom: "neutral" },
 };
 
-export function rotuloDoStatus(status: string): string {
-  return STATUS[status]?.rotulo ?? status;
+export function rotuloDoStatus(status: string, t: (texto: string) => string = (texto) => texto): string {
+  return t(STATUS[status]?.rotulo ?? status);
 }
 
 export function tomDoStatus(status: string): TomDoStatus {
@@ -122,7 +127,13 @@ const TIPO_DO_NO: Record<FlowNode["type"], string> = {
   wait: "Espera",
   condition: "Condição",
   ai_classify: "Interpretação da resposta",
+  match_reply: "Resposta (texto)",
+  repeat: "Repetição",
+  collect: "Pergunta",
+  skill: "Skill",
   action: "Mensagem",
+  // #1540 — não é "Mensagem": é o passo que NÃO fala com o cliente.
+  internal_task: "Lembrete interno",
   end: "Fim",
 };
 
@@ -160,14 +171,37 @@ export function resumoDoNo(node: FlowNode): NoDoDossie {
       };
     case "ai_classify":
       return { ...base, resumo: `classifica a resposta em: ${node.config.classes.join(", ")}` };
+    case "match_reply":
+      return {
+        ...base,
+        resumo: `casa a resposta com: ${node.config.branches.map((b) => b.label).join(", ")}`,
+      };
+    case "repeat":
+      return {
+        ...base,
+        resumo: `repete até ${node.config.max_count} voltas conforme a resposta`,
+      };
+    case "collect":
+      return {
+        ...base,
+        resumo: `pergunta "${node.config.label}" (campo ${node.config.key})`,
+      };
+    case "skill":
+      return { ...base, resumo: `puxa a skill ${node.config.skill_name}` };
     case "action":
       return {
         ...base,
         resumo:
           node.config.mode === "ai_message"
             ? "o agente escreve e envia a mensagem"
-            : "envia uma mensagem de modelo pronto",
+            : node.config.mode === "text"
+              ? "envia um texto fixo"
+              : "envia uma mensagem de modelo pronto",
       };
+    case "internal_task": {
+      const prazo = node.config.vence_em_dias === 0 ? "hoje" : `em ${node.config.vence_em_dias} dia(s)`;
+      return { ...base, resumo: `cria a tarefa "${node.config.titulo}" para ${prazo} — sem mensagem ao cliente` };
+    }
     case "end":
       return { ...base, resumo: `encerra — ${DESFECHO[node.config.outcome] ?? node.config.outcome}` };
   }
@@ -191,9 +225,15 @@ export function resumoDoNo(node: FlowNode): NoDoDossie {
  * dossiê mostra o RÓTULO DO DESTINO ao lado da frase, e é ele que separa duas
  * opções na hora de escolher por onde pular.
  */
-export function rotuloDaAresta(edge: FlowEdge, origem?: FlowNode): string {
+export function rotuloDaAresta(edge: FlowEdge, origem?: FlowNode, nomes: NomesDeValor = {}): string {
   const c = edge.condition;
-  if (c.type === "always") return RAMOS_RESERVADOS_EM_FRASE[FALLBACK_BRANCH_ID];
+  if (c.type === "always") {
+    // Num nó com saídas específicas, o escape não é o "caminho normal": é o que
+    // sobra quando nenhuma das outras serve.
+    return origem !== undefined && nodeBranches(origem).length > 1
+      ? FRASE_DE_OUTROS_CASOS
+      : RAMOS_RESERVADOS_EM_FRASE[FALLBACK_BRANCH_ID];
+  }
   if (c.type === "cond_result") {
     return RAMOS_RESERVADOS_EM_FRASE[c.value ? CONDITION_TRUE_BRANCH_ID : CONDITION_FALSE_BRANCH_ID];
   }
@@ -207,18 +247,23 @@ export function rotuloDaAresta(edge: FlowEdge, origem?: FlowNode): string {
   // v2: reservado tem frase própria; declarado precisa do NÓ, porque é lá que a
   // identidade do ramo mora — e o molde depende do tipo do nó (classe da IA e
   // regra do negócio não se leem igual).
-  return fraseDoRamo(c.branch_id) ?? fraseDoRamoDeclarado(origem, c.branch_id);
+  return fraseDoRamo(c.branch_id) ?? fraseDoRamoDeclarado(origem, c.branch_id, nomes);
 }
 
 const RAMO_SEM_NOME = "por um caminho sem nome";
 
 /** O molde certo para o ramo que o usuário declarou, escolhido pelo tipo do nó. */
-function fraseDoRamoDeclarado(origem: FlowNode | undefined, branchId: string): string {
+function fraseDoRamoDeclarado(origem: FlowNode | undefined, branchId: string, nomes: NomesDeValor): string {
   if (!origem) return RAMO_SEM_NOME;
 
   if (origem.type === "ai_classify") {
     const label = origem.config.branches?.find((b) => b.id === branchId)?.label;
     return label ? fraseDaClasse(label) : RAMO_SEM_NOME;
+  }
+
+  if (origem.type === "match_reply") {
+    const label = origem.config.branches.find((b) => b.id === branchId)?.label;
+    return label ? `quando a resposta casa com “${label}”` : RAMO_SEM_NOME;
   }
 
   if (origem.type === "condition") {
@@ -228,7 +273,7 @@ function fraseDoRamoDeclarado(origem: FlowNode | undefined, branchId: string): s
     // extenso — `regra-2` na tela do operador é o que o vocabulário proíbe.
     return check.label
       ? fraseDaRegraNomeada(check.label)
-      : fraseDaRegraSemNome(check.field, check.op, check.value);
+      : fraseDaRegraSemNome(check.field, check.op, check.value, nomes);
   }
 
   return RAMO_SEM_NOME;
@@ -279,12 +324,12 @@ function texto(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
 
-function quandoLegivel(iso: unknown): string | null {
+function quandoLegivel(iso: unknown, idioma: string): string | null {
   const s = texto(iso);
   if (!s) return null;
   const t = Date.parse(s);
   if (Number.isNaN(t)) return null;
-  return new Intl.DateTimeFormat("pt-BR", {
+  return new Intl.DateTimeFormat(idioma, {
     day: "2-digit",
     month: "short",
     hour: "2-digit",
@@ -304,7 +349,11 @@ function quandoLegivel(iso: unknown): string | null {
 export function descreveEvento(
   evento: EventoDeEnrollment,
   nos: Record<string, NoDoDossie>,
+  idioma: string,
 ): EventoLegivel {
+  // `idioma` por PARÂMETRO, não por hook: este módulo é puro e roda também
+  // fora de componente. Hook aqui quebraria em runtime, e o teste que monta
+  // a função direto passaria verde.
   const onde = refDoNo(evento.node_id, nos);
   const p = evento.payload ?? {};
   const motor = { onde, autor: "motor" as const };
@@ -313,9 +362,18 @@ export function descreveEvento(
 
   switch (evento.event_type) {
     case "node_advanced":
+      // Com `class`, o avanço É a classificação que o motor decidiu: a carência
+      // do classificar venceu sem resposta. "Seguiu em frente" esconderia o porquê.
+      if (texto(p.class) === NO_REPLY_BRANCH_ID) {
+        return {
+          titulo: "O cliente não respondeu dentro do prazo",
+          detalhe: `foi para ${refDoNo(texto(p.next_node_id), nos)}`,
+          ...motor,
+        };
+      }
       return { titulo: "Seguiu em frente", detalhe: `foi para ${refDoNo(texto(p.next_node_id), nos)}`, ...motor };
     case "wait_started": {
-      const ate = quandoLegivel(p.next_eval_at);
+      const ate = quandoLegivel(p.next_eval_at, idioma);
       const modo = texto(p.mode) === "smart" ? " (tempo escolhido pelo agente)" : "";
       return { titulo: "Começou a esperar", detalhe: ate ? `volta a olhar em ${ate}${modo}` : null, ...motor };
     }
@@ -329,11 +387,52 @@ export function descreveEvento(
         : { titulo: "Pediu ao agente para escrever a mensagem", detalhe: null, ...motor };
     case "classify_enqueued":
       return { titulo: "Pediu ao agente para interpretar a resposta", detalhe: null, ...motor };
+    case "classify_waiting": {
+      // Esperar NÃO é travar: o agente olhou, o cliente ainda não respondeu, e o
+      // passo segue aberto até o prazo que a pessoa configurou no nó.
+      const ate = quandoLegivel(p.until, idioma);
+      return {
+        titulo: "Esperando a resposta do cliente",
+        detalhe: ate ? `se ele não responder até ${ate}, o fluxo segue sem a resposta` : null,
+        ...motor,
+      };
+    }
     case "action_recheck": {
-      const ate = quandoLegivel(p.next_eval_at);
+      const ate = quandoLegivel(p.next_eval_at, idioma);
       return {
         titulo: "Conferiu se a mensagem já tinha saído",
         detalhe: ate ? `confere de novo em ${ate}` : null,
+        ...motor,
+      };
+    }
+    case "action_deferred": {
+      // Adiar NÃO é falhar, e o dossiê tem de dizer isso com todas as letras:
+      // sem esta linha o operador vê o passo parado por horas e lê defeito onde
+      // há obediência à janela que ele mesmo configurou.
+      const ate = quandoLegivel(p.until, idioma);
+      return {
+        titulo: "Segurou o envio até o horário permitido",
+        detalhe: ate ? `a janela estava fechada; envia em ${ate}` : "a janela estava fechada",
+        ...motor,
+      };
+    }
+    case "turn_discarded":
+      // A suspensão da conta tirou o turno da fila antes de ele rodar
+      // (migration 0501). Sem esta linha o dossiê mostrava um código cru logo
+      // antes de um segundo "Pediu ao agente para escrever a mensagem".
+      return {
+        titulo: "O envio deste passo foi descartado porque a conta foi suspensa",
+        detalhe: "sai num envio novo quando a conta for reativada",
+        ...motor,
+      };
+    case "held_by_return": {
+      // Como o adiamento pela janela: segurar NÃO é falhar. Sem esta linha o
+      // operador veria o fluxo parado por dias sem saber que ele está esperando
+      // o retorno que o agente combinou com o cliente.
+      const ate = quandoLegivel(p.next_eval_at, idioma);
+      return {
+        titulo: "Segurou o fluxo por causa de um retorno agendado",
+        detalhe: ate ? `volta a andar em ${ate}, um dia depois do retorno` : null,
         ...motor,
       };
     }
@@ -386,16 +485,18 @@ export function descreveEvento(
         detalhe: "o agente não respondeu a tempo; cada espera usa o máximo configurado",
         ...motor,
       };
+    case "turn_skipped":
+      return {titulo:"Acompanhamento encerrado sem novo envio",detalhe:texto(p.reason),...motor};
     case "cancelled_manual":
       return { titulo: "Cancelado por uma pessoa da equipe", detalhe: null, ...pessoa };
     case "paused_manual":
       return { titulo: "Pausado por uma pessoa da equipe", detalhe: texto(p.motivo), ...pessoa };
     case "resumed_manual": {
-      const volta = quandoLegivel(p.next_eval_at);
+      const volta = quandoLegivel(p.next_eval_at, idioma);
       return { titulo: "Retomado por uma pessoa da equipe", detalhe: volta ? `volta a andar em ${volta}` : null, ...pessoa };
     }
     case "snoozed_manual": {
-      const para = quandoLegivel(p.next_eval_at);
+      const para = quandoLegivel(p.next_eval_at, idioma);
       return { titulo: "Adiado por uma pessoa da equipe", detalhe: para ? `adiado para ${para}` : null, ...pessoa };
     }
     case "skipped_manual":
@@ -425,6 +526,18 @@ export function descreveEvento(
           texto(p.source) === "guardrail_autofallback"
             ? "o caso foi aberto por uma trava de segurança, não por decisão do agente"
             : "o agente abriu um caso de atendimento",
+        ...motor,
+      };
+    case "enrolled_by_lead_created":
+      return {
+        titulo: "Começou porque o negócio nasceu",
+        detalhe: "o card acabou de ser criado",
+        ...motor,
+      };
+    case "enrolled_by_inbound_after_silence":
+      return {
+        titulo: "Começou porque o cliente voltou a escrever",
+        detalhe: "depois do tempo de silêncio escolhido no gatilho deste fluxo",
         ...motor,
       };
     case "cancelled_by_case_closed":

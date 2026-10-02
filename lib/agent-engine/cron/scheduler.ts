@@ -1,3 +1,4 @@
+import { currentExecutionBoundary, guardServiceEffect } from "@/lib/atendimento/fronteira-server";
 /**
  * Camada de banco + loop do cron persistente (F3-01; achado OpenClaw 1.2). Irmão
  * da fila (queue/queue.ts): o cron AGENDA para o futuro e, no disparo, ENFILEIRA um
@@ -87,6 +88,7 @@ export async function scheduleCronJob(
   tenantId: string,
   input: ScheduleCronInput,
 ): Promise<CronJobRow> {
+  await guardServiceEffect();
   const nowMs = (input.now ?? Date.now)();
   const nextRunAt = computeInitialRunAt(input.spec, nowMs, input.staggerWindowMs, input.leadId);
   const spec = input.spec;
@@ -104,7 +106,7 @@ export async function scheduleCronJob(
       spec.kind === 'cron' ? spec.expr : null,
       spec.kind === 'cron' ? spec.tz : null,
       input.jobKind ?? null,
-      input.payload ?? {},
+      { ...(input.payload ?? {}), service_boundary: currentExecutionBoundary() ?? input.payload?.service_boundary ?? null },
       nextRunAt,
       input.maxAttempts ?? null,
     ],
@@ -148,6 +150,8 @@ export interface CronTickResult {
   fired: number;
   retried: number;
   disabled: number;
+  /** Vencidos de organização não operante: avançados sem enfileirar. */
+  skipped: number;
 }
 
 type FailureOutcome = { outcome: 'retried' | 'disabled'; classification: string; attempts: number };
@@ -196,13 +200,13 @@ async function fireOneDue(
   pool: pg.Pool,
   cfg: CronTickConfig,
   log: Logger,
-): Promise<'fired' | 'retried' | 'disabled' | 'empty'> {
+): Promise<'fired' | 'retried' | 'disabled' | 'skipped' | 'empty'> {
   const nowMs = (cfg.now ?? Date.now)();
   const client = await pool.connect();
   try {
     await client.query('begin');
-    const { rows } = await client.query<CronJobRow>(
-      `select * from cron_jobs
+    const { rows } = await client.query<CronJobRow & { operante: boolean }>(
+      `select *, public.fn_org_operante(organization_id) as operante from cron_jobs
        where enabled = true and next_run_at <= $1
        order by next_run_at
        limit 1
@@ -215,6 +219,26 @@ async function fireOneDue(
       return 'empty';
     }
     const spec = specFromRow(cron);
+    // Organização parada (suspensa, redigida, arquivada) não recebe follow-up:
+    // o disparo avança sem enfileirar e o one-shot se encerra. Reativar não
+    // devolve o que venceu parado — reativação é sem rajada (spec §1.3).
+    if (!cron.operante) {
+      const proximo = computeNextRunAt(spec, cron.next_run_at.getTime(), nowMs, cfg.staggerWindowMs, cron.contact_id);
+      if (proximo === null) {
+        await client.query(
+          `update cron_jobs set enabled = false, last_error = 'org_nao_operante', updated_at = now() where id = $1`,
+          [cron.id],
+        );
+      } else {
+        await client.query(
+          `update cron_jobs set next_run_at = $2, last_error = 'org_nao_operante', updated_at = now() where id = $1`,
+          [cron.id, proximo],
+        );
+      }
+      await client.query('commit');
+      log.info('cron: organização não operante — disparo pulado sem enfileirar', { cron_job_id: cron.id });
+      return 'skipped';
+    }
     try {
       await client.query('savepoint fire');
       await enqueueJob(client, cron.organization_id, {
@@ -272,7 +296,7 @@ async function fireOneDue(
  * um cron podre não derruba os demais). Para quando esgota os vencidos claimáveis.
  */
 export async function tickCron(pool: pg.Pool, cfg: CronTickConfig, log: Logger): Promise<CronTickResult> {
-  const result: CronTickResult = { fired: 0, retried: 0, disabled: 0 };
+  const result: CronTickResult = { fired: 0, retried: 0, disabled: 0, skipped: 0 };
   for (let i = 0; i < cfg.batchSize; i += 1) {
     const outcome = await fireOneDue(pool, cfg, log);
     if (outcome === 'empty') break;
@@ -300,7 +324,7 @@ export async function runCronLoop(
   while (!signal.aborted) {
     try {
       const tick = await tickCron(pool, cfg, log);
-      if (tick.fired + tick.retried + tick.disabled > 0) log.info('cron: tick processado', { ...tick });
+      if (tick.fired + tick.retried + tick.disabled + tick.skipped > 0) log.info('cron: tick processado', { ...tick });
     } catch (err) {
       log.error('cron: tick falhou — tenta no próximo intervalo', { error: errMsg(err) });
     }

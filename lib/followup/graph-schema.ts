@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { PRIORIDADES_DA_TAREFA } from '@/lib/tarefas/tipos';
+
 /**
  * Flow graph schema for the follow-up automation system.
  * Defines types and Zod validators for nodes, edges, and complete graphs.
@@ -10,7 +12,15 @@ export const NODE_TYPES = [
   'wait',
   'condition',
   'ai_classify',
+  'match_reply',
+  'repeat',
+  'collect',
+  'skill',
   'action',
+  // Lembrete interno (#1540): grava `crm_tasks` e NÃO envia mensagem. É a caixa
+  // que advocacia, saúde e serviços regulados precisam — o sistema lembra a
+  // equipe, a mensagem sai de uma pessoa.
+  'internal_task',
   'end',
 ] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
@@ -42,6 +52,10 @@ export const NO_REPLY_BRANCH_ID = 'no_reply';
 /** The two outputs of a `condition` node evaluating its checks together (`branching: 'combined'`). */
 export const CONDITION_TRUE_BRANCH_ID = 'true';
 export const CONDITION_FALSE_BRANCH_ID = 'false';
+/** Saída do `repeat` enquanto ainda faltam voltas. */
+export const REPEAT_BODY_BRANCH_ID = 'body';
+/** Saída do `repeat` quando o contador chegou a zero. */
+export const REPEAT_DONE_BRANCH_ID = 'done';
 
 /** Branch ids the contract owns — a user-declared branch may not claim one. */
 export const RESERVED_BRANCH_IDS = [
@@ -49,6 +63,8 @@ export const RESERVED_BRANCH_IDS = [
   NO_REPLY_BRANCH_ID,
   CONDITION_TRUE_BRANCH_ID,
   CONDITION_FALSE_BRANCH_ID,
+  REPEAT_BODY_BRANCH_ID,
+  REPEAT_DONE_BRANCH_ID,
 ] as const;
 
 /** Id of a branch the user declared (a check, an AI class) — opaque, stable across renames. */
@@ -80,6 +96,25 @@ export const waitConfigSchema = z
     z.strictObject({
       mode: z.literal('fixed'),
       duration_ms: z.number().int().min(300_000).max(7_776_000_000),
+      /**
+       * A espera NÃO é encurtada nem cancelada quando o contato manda mensagem.
+       *
+       * Existe para a cadência longa — o retorno de manutenção de 28 dias — em
+       * que o cliente falar hoje não é motivo para antecipar um toque de daqui a
+       * um mês. Sem isto, `lib/followup/reactivity.ts` ou cancela a inscrição
+       * (`cancel_on_reply`) ou grava `inbound_woke` e corta o timer: os dois
+       * desfechos matam a cadência, e era por isso que a regra de retorno vivia
+       * no prompt do agente chamando `crm_schedule_followup`.
+       *
+       * Só em `fixed`: `smart` é "a IA escolhe dentro de uma faixa", e faixa
+       * adaptativa com imunidade é combinação que ninguém pediu. O `strictObject`
+       * do outro membro já recusa a chave — vira teste, não código.
+       *
+       * Em runtime isto vira o status `dormente` da inscrição (quem projeta é o
+       * handler do nó, em `node-handlers.ts`), e é o status que tira a inscrição
+       * do alcance da reatividade e libera o slot único anti-spam.
+       */
+      immune_to_reply: z.boolean().optional(),
     }),
     z.strictObject({
       mode: z.literal('smart'),
@@ -100,6 +135,62 @@ export const aiClassBranchSchema = z.strictObject({
 });
 
 export type AiClassBranch = z.infer<typeof aiClassBranchSchema>;
+
+/** Declared output of a `match_reply` node: opaque id + the text rule (no LLM). */
+export const matchReplyBranchSchema = z.strictObject({
+  id: declaredBranchIdSchema,
+  label: z.string().min(1).max(40),
+  op: z.enum(['eq', 'contains']),
+  pattern: z.string().min(1).max(200),
+});
+
+export type MatchReplyBranch = z.infer<typeof matchReplyBranchSchema>;
+
+/**
+ * Where to write the contact's reply. `{{volta}}` in a custom key is replaced
+ * with the current `repeat` index when the node sits inside a loop.
+ */
+export const replySaveToSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('contact_name') }),
+  z.strictObject({
+    kind: z.literal('lead_custom'),
+    key: z
+      .string()
+      .min(1)
+      .max(60)
+      .regex(/^[a-z][a-z0-9_{}]*$/i, 'Use letras, números, underscore ou {{volta}}'),
+  }),
+]);
+export type ReplySaveTo = z.infer<typeof replySaveToSchema>;
+
+/** O que fazer quando o destino de `save_to` já tem valor (captação, ficha…). */
+export const ifExistsSchema = z.enum(["skip", "overwrite", "confirm"]);
+export type IfExists = z.infer<typeof ifExistsSchema>;
+
+/**
+ * Text-match node: parks in `waiting_reply` like `ai_classify`, then routes on
+ * the last inbound body without calling a model. v2 `branches` only.
+ */
+export const matchReplyConfigSchema = z
+  .strictObject({
+    branches: z.array(matchReplyBranchSchema).min(1).max(8),
+    grace_timeout_ms: z.number().int().min(900_000),
+    save_to: replySaveToSchema.optional(),
+    if_exists: ifExistsSchema.optional(),
+  })
+  .refine((c) => new Set(c.branches.map((b) => b.id)).size === c.branches.length, {
+    message: "branches[].id must be unique within the node",
+    path: ["branches"],
+  });
+
+/**
+ * Repete o caminho `body` N vezes, onde N vem da última resposta do contato
+ * (um número, ou palavras tipo "nenhum"/"dois"), limitado por `max_count`.
+ * Estado mora nos eventos do enrollment — voltar ao nó não relê a resposta.
+ */
+export const repeatConfigSchema = z.strictObject({
+  max_count: z.number().int().min(1).max(20),
+});
 
 /**
  * AI classification node configuration.
@@ -141,11 +232,15 @@ export const aiClassifyConfigSchema = z
 
 /**
  * Action node configuration schema.
- * Supports two modes:
+ * - text: send this body as-is (no model)
  * - ai_message: generate a message using AI with a prompt hint
- * - template: send a predefined template message
+ * - template: send a canned message from Ajustes → Modelos
  */
 export const actionConfigSchema = z.discriminatedUnion('mode', [
+  z.strictObject({
+    mode: z.literal('text'),
+    body: z.string().min(1).max(4000),
+  }),
   z.strictObject({
     mode: z.literal('ai_message'),
     prompt_hint: z.string().min(1).max(1000),
@@ -156,6 +251,26 @@ export const actionConfigSchema = z.discriminatedUnion('mode', [
     template_id: z.string().uuid(),
   }),
 ]);
+
+/**
+ * Internal task node configuration (#1540) — os MESMOS campos da ação de
+ * automação `create_task`, de propósito: as duas portas criam a mesma tarefa,
+ * e campos diferentes virariam duas telas ensinando duas verdades.
+ *
+ * `atribuir_a` é nominal (`dono_do_lead`) porque o fluxo é publicado sem saber
+ * quem vai atender amanhã — o dono muda, o fluxo não.
+ */
+export const internalTaskConfigSchema = z.strictObject({
+  /** Título com `{{lead.title}}` e `{{contact.name}}`. */
+  titulo: z.string().min(1).max(200),
+  /** De quantos dias o prazo cai a partir do disparo. */
+  vence_em_dias: z.number().int().min(0).max(365),
+  atribuir_a: z.union([
+    z.literal('dono_do_lead'),
+    z.strictObject({ usuario_id: z.string().uuid() }),
+  ]),
+  prioridade: z.enum(PRIORIDADES_DA_TAREFA),
+});
 
 /**
  * One rule of a `condition` node. In `branching: 'per_check'` it IS a branch,
@@ -207,12 +322,86 @@ export const conditionConfigSchema = z
   });
 
 /**
+ * Collect node (`collect`) — uma pergunta do fluxo de ATENDIMENTO.
+ *
+ * O nó NÃO envia nada sozinho: ele declara o CAMPO que precisa ser preenchido
+ * (chave, rótulo, tipo) e o executor in-turn injeta a pergunta no contexto do
+ * agente. Quando o valor entra (`flow_collect`, extrator ou resposta do cliente),
+ * o campo deixa de ser pendente e o fluxo avança. `key` casa 1:1 com
+ * `contact_flow_data.field_key` (migration 0236) — a regex espelha o CHECK do
+ * banco (minúsculas, começa com letra).
+ */
+/**
+ * `cpf` (PR 2 do port): o número confere pelo dígito verificador (mod-11 da
+ * Receita) antes de ser aceito — na prova prática, um CPF com dígito errado foi
+ * gravado como resposta porque o campo era "Número".
+ */
+export const contactFlowFieldTypeSchema = z.enum(['text', 'number', 'date', 'boolean', 'select', 'cpf']);
+export type ContactFlowFieldType = z.infer<typeof contactFlowFieldTypeSchema>;
+
+export const collectConfigSchema = z
+  .strictObject({
+    key: z
+      .string()
+      .min(1)
+      .max(60)
+      .regex(/^[a-z][a-z0-9_]*$/, 'Use letras minúsculas, números e underscore'),
+    label: z.string().min(1).max(80),
+    type: contactFlowFieldTypeSchema.default('text'),
+    required: z.boolean().default(true),
+    /**
+     * Permite o cliente CORRIGIR o dado a qualquer momento: com `true` (padrão),
+     * uma nova informação sobrescreve a anterior. Com `false`, o primeiro valor
+     * fica travado.
+     */
+    permite_correcao: z.boolean().default(true),
+    options: z.array(z.string().min(1).max(80)).max(20).optional(),
+    /** Texto sugerido da pergunta; o agente pode reescrever (checklist guiado pela IA). */
+    question: z.string().max(400).optional(),
+  })
+  .refine((c) => c.type !== 'select' || (c.options?.length ?? 0) > 0, {
+    message: 'tipo "select" exige ao menos uma opção',
+    path: ['options'],
+  });
+
+/**
+ * Skill node (`skill`) — puxa uma skill instalada em paralelo ao passo do fluxo.
+ * Ao entrar no nó, o executor in-turn inclui o corpo da skill no contexto do
+ * turno (união com o matcher por keyword). O nome é validado contra as skills
+ * instaladas no executor, não aqui (o grafo é portável entre organizações).
+ */
+export const skillConfigSchema = z.strictObject({
+  skill_name: z.string().min(1).max(80),
+});
+
+/**
+ * Ação ao finalizar um fluxo de atendimento — "quando finaliza, chama qual skill
+ * ou manda pra IA". Opcional para não quebrar grafos existentes; ausente = `nada`
+ * (comportamento anterior).
+ */
+export const endFinishSchema = z.discriminatedUnion('tipo', [
+  z.strictObject({ tipo: z.literal('nada') }),
+  z.strictObject({ tipo: z.literal('ia'), prompt: z.string().max(1000).optional() }),
+  z.strictObject({ tipo: z.literal('skill'), skill_name: z.string().min(1).max(80) }),
+  /**
+   * Encadeia a venda: ao concluir, o motor inicia OUTRO fluxo de atendimento
+   * (`fluxo` = id do `followup_flow_pointers`). A síntese do fluxo concluído
+   * (`completion_note`) entra no contexto do próximo. O id é validado em runtime
+   * contra os fluxos instalados da organização (o grafo é portável) — como
+   * `skill_name`. Autoencadeamento (fluxo → ele mesmo) é ignorado pelo motor.
+   */
+  z.strictObject({ tipo: z.literal('proximo_fluxo'), fluxo: z.string().min(1).max(80) }),
+]);
+export type EndFinish = z.infer<typeof endFinishSchema>;
+
+/**
  * End node configuration.
  * Marks the conclusion of a flow with an outcome.
  */
 export const endConfigSchema = z.strictObject({
   outcome: z.enum(['converted', 'exhausted', 'custom']),
   note: z.string().max(200).optional(),
+  ao_finalizar: endFinishSchema.optional(),
 });
 
 /**
@@ -264,6 +453,48 @@ export const flowNodeSchema = z.discriminatedUnion('type', [
     }),
     config: aiClassifyConfigSchema,
   }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('match_reply'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({
+      x: z.number(),
+      y: z.number(),
+    }),
+    config: matchReplyConfigSchema,
+  }),
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('repeat'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({
+      x: z.number(),
+      y: z.number(),
+    }),
+    config: repeatConfigSchema,
+  }),
+  // Collect node: uma pergunta do fluxo de atendimento (coleta um campo)
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('collect'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({
+      x: z.number(),
+      y: z.number(),
+    }),
+    config: collectConfigSchema,
+  }),
+  // Skill node: puxa uma skill instalada em paralelo ao passo
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('skill'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({
+      x: z.number(),
+      y: z.number(),
+    }),
+    config: skillConfigSchema,
+  }),
   // Action node: sends a message
   z.strictObject({
     id: z.string().min(1),
@@ -274,6 +505,17 @@ export const flowNodeSchema = z.discriminatedUnion('type', [
       y: z.number(),
     }),
     config: actionConfigSchema,
+  }),
+  // Internal task node (#1540): creates a CRM task, never sends a message
+  z.strictObject({
+    id: z.string().min(1),
+    type: z.literal('internal_task'),
+    label: z.string().min(1).max(60),
+    position: z.strictObject({
+      x: z.number(),
+      y: z.number(),
+    }),
+    config: internalTaskConfigSchema,
   }),
   // End node: terminal state
   z.strictObject({
@@ -327,13 +569,105 @@ export type FlowEdge = z.infer<typeof flowEdgeSchema>;
 export type FlowEdgeCondition = FlowEdge['condition'];
 
 /**
+ * Configurações do fluxo (nível do grafo, não de um nó). Opcional: um grafo
+ * antigo sem `settings` continua válido e cai nos defaults.
+ */
+export const flowSettingsSchema = z.strictObject({
+  /**
+   * Quantas vezes uma pergunta pode ser feita SEM resposta antes de ser
+   * encerrada como não respondida (deixa de ser feita e não bloqueia a
+   * conclusão). Default 3.
+   */
+  max_tentativas_pergunta: z.number().int().min(1).max(10).default(3),
+  /**
+   * Palavras/expressões que LIGAM este fluxo: quando a mensagem do cliente
+   * contém uma delas, o MOTOR inicia o fluxo (entrada por gatilho, sem depender
+   * do modelo). Vazio/ausente = o fluxo só começa por `flow_start` ou roteador.
+   */
+  gatilhos: z.array(z.string().min(1).max(60)).max(30).optional(),
+  /**
+   * Em quantas horas SEM mensagem do cliente o roteiro em andamento expira
+   * (0397, `fn_encerrar_roteiros_vencidos`). Ausente = 72 h. Sem prazo, um
+   * roteiro abandonado voltava a perguntar semanas depois (prova do #1130).
+   */
+  expira_em_horas: z.number().int().min(1).max(720).optional(),
+  /**
+   * O roteiro pode começar de novo para um cliente que JÁ o concluiu (#1130,
+   * decisão do doc 69: cada roteiro escolhe). Ausente = NÃO recomeça: repetir a
+   * palavra-gatilho de um cadastro já feito reabria as mesmas perguntas.
+   * Agendamento, que precisa repetir, liga.
+   */
+  pode_recomecar: z.boolean().optional(),
+  /**
+   * SOMENTE INTERNO (#1540): o fluxo inteiro não fala com o cliente. A
+   * publicação (`validate-publish.ts`) recusa qualquer nó de ENVIO num fluxo
+   * com esta marca — é a garantia de que "só lembrete" não é uma intenção que
+   * alguém esquece de conferir antes de publicar.
+   */
+  somente_interno: z.boolean().optional(),
+});
+export type FlowSettings = z.infer<typeof flowSettingsSchema>;
+
+/**
  * Complete flow graph schema.
  * Contains nodes and edges defining the flow automation.
+ *
+ * O `strictObject` valida cada nó e cada aresta SOZINHOS; o `superRefine`
+ * abaixo é a catraca de INTEGRIDADE entre eles. Sem ela, um grafo com aresta
+ * apontando para nó inexistente ou com ids repetidos (o defeito que o #586
+ * produz no canvas) passava no `safeParse` de qualquer consumidor — salvar o
+ * rascunho (`draft_graph`), carregar a versão (engine, turn-bridge, enroll,
+ * silence-sweep, intervenção) e publicar. A porta é a mesma para todos: quem
+ * JÁ tiver rascunho corrompido recebe o erro com o id a corrigir em vez de um
+ * grafo que só quebra adiante, no meio de um disparo. Sem migração de
+ * rascunho — decisão registrada na issue #699.
  */
-export const flowGraphSchema = z.strictObject({
-  nodes: z.array(flowNodeSchema).min(2).max(60),
-  edges: z.array(flowEdgeSchema).max(120),
-});
+export const flowGraphSchema = z
+  .strictObject({
+    nodes: z.array(flowNodeSchema).min(2).max(60),
+    edges: z.array(flowEdgeSchema).max(120),
+    settings: flowSettingsSchema.optional(),
+  })
+  .superRefine((grafo, ctx) => {
+    const idsDeNo = new Set<string>();
+    grafo.nodes.forEach((no, i) => {
+      if (idsDeNo.has(no.id)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `id de nó repetido: "${no.id}"`,
+          path: ['nodes', i],
+        });
+      }
+      idsDeNo.add(no.id);
+    });
+
+    const idsDeAresta = new Set<string>();
+    grafo.edges.forEach((aresta, i) => {
+      if (idsDeAresta.has(aresta.id)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `id de aresta repetido: "${aresta.id}"`,
+          path: ['edges', i],
+        });
+      }
+      idsDeAresta.add(aresta.id);
+
+      if (!idsDeNo.has(aresta.source)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `aresta "${aresta.id}" aponta para nó inexistente: "${aresta.source}"`,
+          path: ['edges', i],
+        });
+      }
+      if (!idsDeNo.has(aresta.target)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `aresta "${aresta.id}" aponta para nó inexistente: "${aresta.target}"`,
+          path: ['edges', i],
+        });
+      }
+    });
+  });
 
 export type FlowGraph = z.infer<typeof flowGraphSchema>;
 
@@ -392,7 +726,17 @@ export type FlowBranch = {
   condition: FlowEdgeCondition;
 };
 
+/** Nó de saída ÚNICA: a aresta sai por ali sempre, e é isso que o rótulo diz. */
 const FALLBACK_ALWAYS_LABEL = 'Sempre';
+/**
+ * Nó que JÁ tem saídas específicas. O motor só usa esta aresta quando nenhuma
+ * outra serve (`selectEdge`, node-handlers), e nunca manda o lead por duas ao
+ * mesmo tempo — "Sempre" ao lado de "Interessado" e "Sem resposta" prometia
+ * justamente isso, e quem montava o fluxo ligava aqui a mensagem que queria
+ * mandar a todo mundo.
+ */
+const FALLBACK_OTHERS_LABEL = 'Outros casos';
+/** O mesmo escape num nó cujas saídas são REGRAS: "o resto", dito com a palavra das regras. */
 const FALLBACK_NONE_LABEL = 'Nenhuma delas';
 const NO_REPLY_LABEL = 'Sem resposta';
 
@@ -446,7 +790,7 @@ export function nodeBranches(node: BranchableNode): FlowBranch[] {
           kind: 'match',
           condition: { type: 'cond_result', value: false },
         },
-        fallbackBranch(FALLBACK_ALWAYS_LABEL),
+        fallbackBranch(FALLBACK_OTHERS_LABEL),
       ];
     }
 
@@ -478,9 +822,49 @@ export function nodeBranches(node: BranchableNode): FlowBranch[] {
             ? { type: 'branch', branch_id: NO_REPLY_BRANCH_ID }
             : { type: 'class_match', value: NO_REPLY_BRANCH_ID },
         },
-        fallbackBranch(FALLBACK_ALWAYS_LABEL),
+        fallbackBranch(FALLBACK_OTHERS_LABEL),
       ];
     }
+
+    case 'match_reply': {
+      const classBranches: FlowBranch[] = node.config.branches.map((b) => ({
+        id: b.id,
+        label: b.label,
+        check: null,
+        kind: 'match' as const,
+        condition: { type: 'branch' as const, branch_id: b.id },
+      }));
+      return [
+        ...classBranches,
+        {
+          id: NO_REPLY_BRANCH_ID,
+          label: NO_REPLY_LABEL,
+          check: null,
+          kind: 'match',
+          condition: { type: 'branch', branch_id: NO_REPLY_BRANCH_ID },
+        },
+        fallbackBranch(FALLBACK_OTHERS_LABEL),
+      ];
+    }
+
+    case 'repeat':
+      return [
+        {
+          id: REPEAT_BODY_BRANCH_ID,
+          label: 'Próxima volta',
+          check: null,
+          kind: 'match',
+          condition: { type: 'branch', branch_id: REPEAT_BODY_BRANCH_ID },
+        },
+        {
+          id: REPEAT_DONE_BRANCH_ID,
+          label: 'Acabou',
+          check: null,
+          kind: 'match',
+          condition: { type: 'branch', branch_id: REPEAT_DONE_BRANCH_ID },
+        },
+        fallbackBranch(FALLBACK_OTHERS_LABEL),
+      ];
 
     default:
       return [fallbackBranch(FALLBACK_ALWAYS_LABEL)];

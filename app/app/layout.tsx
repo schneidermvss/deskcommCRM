@@ -1,8 +1,11 @@
+import { InterfaceRefresh } from "@/hooks/auth/InterfaceRefresh";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
 import { isMfaEnrolled, loadAuthUser, requiresMfa, resolveActiveOrg } from "@/lib/auth/server";
-import { DEFAULT_VISIBILITY_MODE, type VisibilityMode } from "@/lib/auth/types";
+import { DEFAULT_VISIBILITY_MODE, roleAtLeast, type VisibilityMode } from "@/lib/auth/types";
+import { clientePelaAgendaLigado } from "@/lib/schemas/settings";
 import { AuthProvider } from "@/hooks/auth/AuthProvider";
+import { ProvedorDeCoresDasEtiquetas } from "@/components/tags/CoresDasEtiquetas";
 import { AppShell } from "./_components/AppShell";
 import { EstiloDaMarcaDaOrganizacao } from "./_components/EstiloDaMarcaDaOrganizacao";
 import { MfaEnrollGate } from "@/components/auth/MfaEnrollGate";
@@ -11,23 +14,39 @@ import { marcaDaInstalacao } from "@/lib/branding/instalacao";
 import { resolverMarcaDaOrganizacao } from "@/lib/branding/organizacao";
 import { env } from "@/lib/env";
 import { createAdminClient } from "@/lib/supabase/admin";
-import {
-  IMPERSONATE_COOKIE_NAME,
-  verifyImpersonateCookie,
-} from "@/lib/impersonate/cookie";
+import { modulosLigados } from "@/lib/instalacao/modulos";
+import { capacidadesLigadas } from "@/lib/organizacao/capacidades";
+import { ehOperante } from "@/lib/organizacao/operante";
 import {
   ImpersonateBanner,
-  type ImpersonatingInfo,
 } from "@/components/app/ImpersonateBanner";
 import { ConexaoCaidaBanner } from "@/components/app/ConexaoCaidaBanner";
 import { IdiomaProvider } from "@/lib/i18n/IdiomaProvider";
 import { listarConexoesCaidas, type ConexaoCaida } from "@/lib/channels/health";
+import { VoiceCallProvider } from "@/components/voice/VoiceCallContext";
+import { ProvedorDaOcupacaoDoRodape } from "@/lib/ui/rodape-ocupado";
+import { acessoFoiRevogado } from "@/lib/auth/vinculo-revogado";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await loadAuthUser();
   if (!user) redirect("/login");
 
   let activeOrg = await resolveActiveOrg(user);
+
+  // Sem organização ativa existem DOIS estados, e eles pedem telas opostas:
+  //
+  //  - nunca teve  → provisionamento que falhou no signup. `/get-started`
+  //                  existe exatamente para isso e continua sendo o caminho.
+  //  - teve e foi revogada → precisa SABER disso. Até 2026-09-10 essa pessoa
+  //                  caía aqui mesmo, via a casca vazia e a oferta "Configure
+  //                  sua organização" — uma revogação virando criação de
+  //                  tenant. Medido numa instalação real.
+  //
+  // A consulta só roda neste ramo, que é o raro: quem tem organização não paga
+  // nada por ela.
+  if (!activeOrg && !user.support && (await acessoFoiRevogado(user.id))) {
+    redirect("/acesso-revogado");
+  }
 
   /**
    * A cor desta organização, serializada, ou `null` quando ela não tem uma.
@@ -39,66 +58,83 @@ export default async function AppLayout({ children }: { children: React.ReactNod
    */
   let cssDaOrganizacao: string | null = null;
 
-  const store = await cookies();
-  const collapsed = store.get("sidebar_collapsed")?.value === "1";
-  const impCookie = store.get(IMPERSONATE_COOKIE_NAME)?.value;
-  const impResult = impCookie ? verifyImpersonateCookie(impCookie) : null;
-
-  /**
-   * As cinco consultas abaixo NÃO dependem uma da outra — cada uma só precisa
-   * do `user`/`activeOrg` já resolvidos acima — mas rodavam em série, uma
-   * `await` por vez. Numa VPS fora da região do banco (medido: EUA↔São Paulo,
-   * ~250-500ms por ida), seis-oito idas sequenciais é exatamente o que
-   * empurrava `/app` para os ~2-3s onde o navegador cancela a requisição — o
-   * "reading: context canceled" que aparece como 502 no Caddy. `Promise.all`
-   * troca a SOMA das latências pela MAIOR delas.
-   *
-   * O gate de onboarding/suspensão (que olha `orgRow`) continua rodando DEPOIS
-   * do `Promise.all`, não dentro dele: nas duas rotas de redirect o trabalho
-   * das outras quatro consultas é descartado, e está certo que seja — é o
-   * preço aceito por não startar um `Promise.all` condicional a um `if` que
-   * ainda não sabemos se vai redirecionar.
-   */
-  const admin = createAdminClient();
-  const [
-    { data: orgRow },
-    conexoesCaidas,
-    enrolled,
-    needsMfaGate,
-    impOrgRow,
-  ] = await Promise.all([
-    activeOrg
-      ? admin
-          .from("organizations")
-          .select("onboarded_at, status, settings")
-          .eq("id", activeOrg.orgId)
-          .maybeSingle()
-      : Promise.resolve({ data: null }),
-    activeOrg ? listarConexoesCaidas(admin, activeOrg.orgId) : Promise.resolve([] as ConexaoCaida[]),
-    isMfaEnrolled(),
-    // Usa o `activeOrg` JÁ resolvido (antes do bloco abaixo mutá-lo com
-    // `visibility_mode`/`marca`) — `role`, o único campo que `requiresMfa` lê
-    // dele, não muda naquele bloco, então adiantar esta chamada é seguro.
-    requiresMfa(activeOrg?.role, user.is_platform_admin, user.id, activeOrg?.orgId),
-    impResult?.valid && impResult.payload
-      ? admin
-          .from("organizations")
-          .select("display_name")
-          .eq("id", impResult.payload.tenantId)
-          .maybeSingle()
-      : Promise.resolve({ data: null }),
-  ]);
-
   // EPIC-02: gate /app/* on completed onboarding.
   // EPIC-11: gate /app/* on org not being suspended (S-11.08).
+  let conexoesCaidas: ConexaoCaida[] = [];
+  let enrolled = false;
+  let needsMfaGate = false;
+
   if (activeOrg) {
-    if (orgRow && !orgRow.onboarded_at) redirect("/onboarding");
-    if (orgRow?.status === "suspended") redirect("/account-suspended");
+    const admin = createAdminClient();
+    /**
+     * As cinco consultas que TODA página de `/app` paga, disparadas juntas.
+     *
+     * Elas eram sequenciais e independentes: cada uma esperava a anterior sem
+     * precisar do resultado dela, e a soma aparecia como a tela que não reage ao
+     * clique. Em paralelo, o custo passa a ser o da mais lenta.
+     *
+     * Duas consequências que valem estar escritas, porque não são acidente:
+     *
+     *  - `listarConexoesCaidas` e `requiresMfa` agora rodam ANTES dos `redirect`
+     *    de onboarding e de suspensão. Quem vai ser redirecionado paga duas
+     *    consultas a mais — um caminho raro, que termina numa navegação de
+     *    qualquer forma. O caminho normal, que é todo render de todo usuário,
+     *    deixa de pagar três esperas em fila.
+     *  - A consulta das conexões continua morando no seam
+     *    (`lib/channels/health`), não aqui: tela que monta o select de
+     *    `channel_sessions` à mão foi o que deixou três seletores oferecendo
+     *    canal arquivado (invariante `canais-selecionaveis`), e de quebra o
+     *    filtro de estados fica LITERALMENTE o mesmo que decide o aviso da
+     *    Central. Vigiado por
+     *    `tests/unit/faixa-de-conexao-caida-vem-do-seam.test.tsx`, que EXECUTA
+     *    este layout — a cerca anterior lia o texto-fonte e reprovava esta
+     *    refatoração sem que nada tivesse quebrado.
+     */
+    const [orgRes, conexoes, isEnrolled, mfaRequired, modulos] = await Promise.all([
+      admin
+        .from("organizations")
+        .select("onboarded_at, status, settings")
+        .eq("id", activeOrg.orgId)
+        .maybeSingle(),
+      listarConexoesCaidas(admin, activeOrg.orgId),
+      isMfaEnrolled(),
+      requiresMfa(
+        activeOrg.role,
+        user.is_platform_admin,
+        user.id,
+        activeOrg.orgId,
+      ),
+      // Da INSTALAÇÃO: decide se a porta de um módulo opcional entra no menu.
+      modulosLigados(admin),
+    ]);
+
+    const orgRow = orgRes.data;
+    // Erro de leitura LANÇA: `orgRow` nulo passava por "sem onboarding pendente
+    // e não suspensa" e renderizava a casca de uma org que ninguém conseguiu ler.
+    if (orgRes.error) {
+      throw new Error(`organizacao_ilegivel: ${orgRes.error.message}`);
+    }
+    conexoesCaidas = conexoes;
+    enrolled = isEnrolled;
+    needsMfaGate = mfaRequired;
+
+    // Suspensão ANTES de onboarding: a org suspensa que nunca terminou o
+    // onboarding ia para `/onboarding` e escapava da tela da suspensão.
+    if (!ehOperante(orgRow?.status)) redirect("/account-suspended");
+    if (orgRow && !orgRow.onboarded_at && !user.support) redirect("/onboarding");
     // G4-02: expõe visibility_mode ao client (inbox decide visões visíveis).
     // Fonte confiável (admin client, org do cookie validado) — nunca do body.
     const mode = (orgRow?.settings as { visibility_mode?: VisibilityMode } | null)
       ?.visibility_mode;
-    activeOrg = { ...activeOrg, visibility_mode: mode ?? DEFAULT_VISIBILITY_MODE };
+    activeOrg = {
+      ...activeOrg,
+      visibility_mode: mode ?? DEFAULT_VISIBILITY_MODE,
+      // Mesma linha de `settings` já lida acima — nenhuma consulta a mais.
+      cliente_pela_agenda: clientePelaAgendaLigado(orgRow?.settings),
+      modulos_ligados: modulos,
+      // Mesma linha de `settings` já lida acima — nenhuma consulta a mais.
+      capacidades_ligadas: capacidadesLigadas(orgRow?.settings, modulos),
+    };
 
     // `marcaDaInstalacao()` é memoizada por TTL no PROCESSO (`lib/branding/
     // instalacao.ts`), e a derivação da cor é cacheada por régua+semente em
@@ -142,6 +178,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     // do produtor existir, de propósito — foi o que fez o upload por organização
     // ser só a camada, sem mais uma passada pela casca inteira.
     const marcaDoTenant = {
+      logoDarkUrl: marca.logoDarkUrl ?? null,
       ...(marca.origens.nome === "organizacao" ? { nome: marca.name } : {}),
       ...(marca.origens.logoUrl === "organizacao" && marca.logoUrl !== null
         ? { logoUrl: marca.logoUrl }
@@ -150,36 +187,78 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     if (Object.keys(marcaDoTenant).length > 0) {
       activeOrg = { ...activeOrg, marca: marcaDoTenant };
     }
-  }
 
-  // A conexão caiu, o MFA está inscrito e se é exigido: as três já foram
-  // buscadas no `Promise.all` lá em cima — `conexoesCaidas`, `enrolled` e
-  // `needsMfaGate` chegam aqui prontos, não é preciso mais nenhum `await`.
-
-  // Impersonate (S-11.07): verify cookie server-side and resolve tenant name.
-  // Middleware already validates HMAC + expiry on /app/*; we re-verify here as
-  // defence-in-depth and to extract the payload safely. `impResult` e
-  // `impOrgRow` também já vieram do `Promise.all`.
-  let impersonating: ImpersonatingInfo | null = null;
-  if (impResult?.valid && impResult.payload) {
-    const org = impOrgRow.data;
-    if (org) {
-      impersonating = {
-        tenantId: impResult.payload.tenantId,
-        tenantName: org.display_name,
-        expiresAt: new Date(impResult.payload.exp * 1000).toISOString(),
+    // Link extra do menu lateral (customização de cliente) — ver o
+    // docblock de `linkExtra` em lib/auth/types.ts.
+    if (
+      env.SIDEBAR_LINK_EXTRA_ORG_ID &&
+      env.SIDEBAR_LINK_EXTRA_URL &&
+      activeOrg.orgId === env.SIDEBAR_LINK_EXTRA_ORG_ID
+    ) {
+      activeOrg = {
+        ...activeOrg,
+        linkExtra: {
+          url: env.SIDEBAR_LINK_EXTRA_URL,
+          label: env.SIDEBAR_LINK_EXTRA_LABEL || "Loja",
+        },
       };
     }
+  } else {
+    const [isEnrolled, mfaRequired] = await Promise.all([
+      isMfaEnrolled(),
+      requiresMfa(undefined, user.is_platform_admin, user.id, undefined),
+    ]);
+    enrolled = isEnrolled;
+    needsMfaGate = mfaRequired;
   }
 
-  const shell = <AppShell sidebarCollapsed={collapsed}>{children}</AppShell>;
+  // Read sidebar collapsed state SSR to avoid flash.
+  const store = await cookies();
+  const collapsed = store.get("sidebar_collapsed")?.value === "1";
+
+  const impersonating = user.support ? {
+    tenantId: user.support.organization_id, tenantName: user.support.name,
+    expiresAt: user.support.expires_at, accessMode: user.support.access_mode,
+  } : null;
+
+  // O CONTRATO DE OCUPAÇÃO DO RODAPÉ (issue #1305) envolve a casca E as peças de
+  // voz. O `VoiceCallProvider` desenha o painel de chamada DEPOIS dos children,
+  // ou seja: o painel é IRMÃO do `AppShell`, não filho dele. Um provedor por
+  // dentro do `VoiceCallProvider` deixaria o painel de fora — ele declararia o
+  // que ocupa e ninguém descontaria, que é exatamente o defeito da #1305.
+  const shell = (
+    <ProvedorDaOcupacaoDoRodape>
+      <VoiceCallProvider>
+        <AppShell
+          sidebarCollapsed={collapsed}
+          podeAtender={Boolean(activeOrg && roleAtLeast(activeOrg.role, "agent"))}
+        >
+          {children}
+        </AppShell>
+      </VoiceCallProvider>
+    </ProvedorDaOcupacaoDoRodape>
+  );
 
   return (
     // O idioma envolve a árvore inteira e recebe o código PRONTO — ele não
     // pergunta quem está logado. Ver `lib/i18n/IdiomaProvider`: foi o
     // acoplamento com a autenticação que derrubou 32 casos.
-    <IdiomaProvider locale={user.locale}>
+    <IdiomaProvider locale={user.idioma}>
     <AuthProvider user={user} activeOrg={activeOrg}>
+      {/*
+        A COR DA ETIQUETA, uma leitura por tela.
+
+        O chip aparece em LISTA — uma fila de duzentas conversas desenha quatro
+        centenas deles — e todos consultam o mesmo mapa, montado uma vez aqui.
+        Um `useQuery` por chip seria o mesmo cache (o react-query deduplica a
+        rede), mas cada atualização acordaria todas as assinaturas.
+
+        Dentro do `AuthProvider` porque a leitura é da organização ativa, e FORA
+        do `AppShell` porque o gate de MFA substitui a casca: o mapa precisa
+        sobreviver ao portão, e não ser relido quando ele sai.
+      */}
+      <ProvedorDeCoresDasEtiquetas>
+      <InterfaceRefresh userId={user.id} org={activeOrg} support={!!user.support} />
       {/*
         O MARCADOR da marca da organização — o elemento cuja existência define o
         escopo `body:has([data-marca-org])` (lib/branding/css.ts).
@@ -208,6 +287,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           shell
         )}
       </div>
+      </ProvedorDeCoresDasEtiquetas>
     </AuthProvider>
     </IdiomaProvider>
   );

@@ -1,5 +1,7 @@
 "use server";
 
+import { escreveComoPlatformAdmin } from "@/lib/auth/types";
+
 /**
  * Server Action: start the Nuvemshop OAuth flow for the active org.
  *
@@ -9,6 +11,7 @@
  * so the UI can render the "configure env" card without crashing.
  */
 
+import { supportWriteError, authenticatedSessionId } from "@/lib/impersonate/support";
 import { redirect } from "next/navigation";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
 import { buildAuthorizeUrl } from "@/lib/nuvemshop/oauth";
@@ -22,19 +25,20 @@ export async function connectNuvemshop(): Promise<ConnectResult> {
   const user = await loadAuthUser();
   if (!user) return { ok: false, error: "auth_required" };
 
+  if (supportWriteError(user.support)) return { ok: false, error: "forbidden" };
   const activeOrg = await resolveActiveOrg(user);
   if (!activeOrg) return { ok: false, error: "no_active_org" };
 
   // Only `admin` can wire up integrations (RBAC). `manager`/`agent`/`viewer`
   // see the UI read-only.
-  if (activeOrg.role !== "admin" && !user.is_platform_admin) {
+  if (activeOrg.role !== "admin" && !escreveComoPlatformAdmin(user)) {
     return { ok: false, error: "forbidden" };
   }
 
   const cfg = getConfig();
   if (!cfg) return { ok: false, error: "not_configured" };
 
-  const state = issueState(activeOrg.orgId);
+  const state = issueState(activeOrg.orgId, { userId: user.id, authSessionId: await authenticatedSessionId() });
   const url = buildAuthorizeUrl({ appId: cfg.appId, state });
   redirect(url);
 }

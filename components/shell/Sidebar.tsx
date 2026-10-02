@@ -2,32 +2,27 @@
 import Link from "next/link";
 import { useT } from "@/hooks/i18n/useT";
 import { usePathname } from "next/navigation";
-import { useTransition } from "react";
-import { ArrowRight, CaretDoubleLeft, CaretDoubleRight, Gear, Storefront } from "@/lib/ui/icons";
+import { useEffect, useState, useTransition } from "react";
+import { ArrowRight, CaretDoubleLeft, CaretDoubleRight, CaretDown, Gear, Storefront } from "@/lib/ui/icons";
 import { cn } from "@/lib/utils";
 import { toggleSidebar } from "@/app/actions/shell/toggleSidebar";
 import { useAuth } from "@/hooks/auth/AuthProvider";
 import { ConnectionHealthDot } from "@/components/connections/ConnectionHealthDot";
+import { ContadorDeCasos } from "@/components/shell/ContadorDeCasos";
+import { ContadorDaFila } from "@/components/shell/ContadorDaFila";
 import { VersionFooter } from "@/components/shell/VersionFooter";
+import { LogotipoDoProduto, SimboloDoProduto } from "@/components/branding/MarcaDoProduto";
+import { marcaEhADoProduto } from "@/lib/branding";
 import { useMarcaDaInstalacao } from "@/lib/branding/contexto";
-import { GRUPO_NO_RODAPE, NAV_GROUPS, sidebarGroups } from "@/lib/navigation/registry";
+import { GRUPO_NO_RODAPE, sidebarGroups } from "@/lib/navigation/registry";
+
+const CHAVE_GRUPOS_FECHADOS = "sidebar-grupos-fechados";
 
 interface SidebarContentProps {
   collapsed: boolean;
   showCollapseControl?: boolean;
   onNavigate?: () => void;
 }
-
-/**
- * Link fixo de "Estoque" para a organização Nilson Veículos — aponta pro
- * Sanity Studio do site dela, fora do CRM. Hardcoded por org_id de propósito:
- * é o único cliente que precisa disso hoje, e um flag genérico em
- * `organizations.settings` seria plumbing especulativo para um caso só.
- * Quando um segundo cliente precisar de algo assim, isto vira campo de
- * verdade (ex.: `settings.links_externos`).
- */
-const NILSON_VEICULOS_ORG_ID = "cc29cde8-f2f6-4e28-9387-dbeaaf4a0f29";
-const NILSON_ESTOQUE_URL = "https://nilsonveiculos.vercel.app/studio/structure/veiculosDoEstoque";
 
 /**
  * Navegação principal, agrupada por objetivo.
@@ -48,11 +43,47 @@ export function SidebarContent({
   const pathname = usePathname();
   const [isPending, startTransition] = useTransition();
   const { user, activeOrg } = useAuth();
-  const todos = sidebarGroups(user.is_platform_admin, activeOrg?.role ?? null);
+  const todos = sidebarGroups(
+    user.is_platform_admin && !user.support,
+    activeOrg?.role ?? null,
+    activeOrg?.interface_settings,
+    activeOrg?.modulos_ligados ?? [],
+    activeOrg?.capacidades_ligadas ?? [],
+  );
   // Configurações sai da área que rola e vai para o rodapé fixo: medido em
   // 1280x768, ele caía fora da dobra mesmo em telas de 1080px.
   const grupos = todos.filter((g) => g.group.id !== GRUPO_NO_RODAPE);
-  const rodape = NAV_GROUPS.find((g) => g.id === GRUPO_NO_RODAPE)?.hub;
+  const rodape = todos.find((g) => g.group.id === GRUPO_NO_RODAPE)?.group.hub;
+
+  /**
+   * Grupo fechado é preferência POR NAVEGADOR, não por conta: começa vazio (tudo
+   * aberto) em toda renderização — servidor, primeira pintura do cliente e nos
+   * testes, que nunca clicam em nada — e só muda depois do mount, se o
+   * `localStorage` tiver algo salvo. Guardar o CONJUNTO DOS FECHADOS, e não dos
+   * abertos, é o que faz "sem preferência salva" já significar "tudo aberto".
+   */
+  const [gruposFechados, setGruposFechados] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    try {
+      const salvo = window.localStorage.getItem(CHAVE_GRUPOS_FECHADOS);
+      if (salvo) setGruposFechados(new Set(JSON.parse(salvo) as string[]));
+    } catch {
+      // Storage bloqueado (aba privada) — fica tudo aberto, que é o padrão.
+    }
+  }, []);
+  function toggleGrupo(id: string) {
+    setGruposFechados((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      try {
+        window.localStorage.setItem(CHAVE_GRUPOS_FECHADOS, JSON.stringify([...next]));
+      } catch {
+        // Clique continua funcionando nesta sessão; só não sobrevive a um F5.
+      }
+      return next;
+    });
+  }
 
   const brand = useMarcaDaInstalacao();
   /**
@@ -84,28 +115,71 @@ export function SidebarContent({
    * descer para ele — que é o contrário do que a precedência por campo promete.
    */
   const logo = activeOrg?.marca?.logoUrl || brand.logoUrl;
+  const logoEscuro =
+    activeOrg?.marca?.logoDarkUrl !== undefined
+      ? activeOrg.marca.logoDarkUrl
+      : activeOrg?.marca?.logoUrl
+        ? null
+        : brand.logoDarkUrl;
+  // Só quando NINGUÉM — nem a instalação, nem a organização — pôs marca própria:
+  // é a condição de `lib/branding.ts`, avaliada sobre o que a barra vai mostrar.
+  const marcaDoProduto = marcaEhADoProduto({ name: nome, logoUrl: logo ?? null });
 
   return (
     <>
-      <div className={cn("flex items-center border-b px-4 h-14", collapsed ? "justify-center" : "justify-start")}>
-        {logo && !collapsed ? (
-          // <img> em vez de next/image de propósito: a URL vem de quem hospeda
-          // (banco ou .env), e next/image exige allowlist de domínios fechada em
-          // build — a imagem pré-buildada rejeitaria o domínio do self-hoster.
-          // Altura fixa e largura livre porque a arte enviada tem proporção
-          // desconhecida; forçar as duas distorceria o logo de quem configurou.
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={logo}
-            alt={nome}
-            className="h-7 w-auto max-w-[10rem] object-contain"
-          />
-        ) : (
-          <span className={cn("font-semibold tracking-tight", collapsed && "sr-only")}>
-            {nome}
-          </span>
+      <div
+        className={cn(
+          "flex h-14 items-center border-b px-4",
+          collapsed ? "justify-center" : "justify-start",
         )}
-        {collapsed && (
+      >
+        {(logo || logoEscuro) && !collapsed ? (
+          // Sem arte própria para o escuro, preserva a proteção de contraste.
+          <div
+            className={cn(
+              "rounded-md",
+              !logoEscuro && "dark:bg-white dark:px-2 dark:py-1 dark:shadow-sm",
+            )}
+          >
+            {/* <img> em vez de next/image de propósito: a URL vem de quem hospeda
+              (banco ou .env), e next/image exige allowlist de domínios fechada em
+              build — a imagem pré-buildada rejeitaria o domínio do self-hoster.
+              Altura fixa e largura livre porque a arte enviada tem proporção
+              desconhecida; forçar as duas distorceria o logo de quem configurou. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            {logo ? (
+              <img
+                src={logo}
+                alt={nome}
+                className={cn(
+                  "h-7 w-auto max-w-[10rem] object-contain",
+                  logoEscuro && "dark:hidden",
+                )}
+              />
+            ) : (
+              <span className="dark:hidden">{nome}</span>
+            )}
+            {logoEscuro ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={logoEscuro}
+                alt={nome}
+                className="hidden h-7 w-auto max-w-[10rem] object-contain dark:block"
+              />
+            ) : null}
+          </div>
+        ) : marcaDoProduto ? (
+          // O desenho do produto, inline (ver `components/branding/MarcaDoProduto.tsx`):
+          // logotipo com a barra aberta, só o símbolo com ela recolhida.
+          collapsed ? (
+            <SimboloDoProduto nome={nome} className="h-8 w-8" />
+          ) : (
+            <LogotipoDoProduto nome={nome} className="h-8 w-auto" />
+          )
+        ) : (
+          <span className={cn("font-semibold tracking-tight", collapsed && "sr-only")}>{nome}</span>
+        )}
+        {collapsed && !marcaDoProduto && (
           <span aria-hidden className="text-lg font-bold text-primary">
             {/* Spread e não `[0]`: nome começando com emoji ou acento composto
                 quebraria no meio do code point. Mesma regra de `resolveBranding`
@@ -115,9 +189,57 @@ export function SidebarContent({
           </span>
         )}
       </div>
-      <nav className="flex-1 space-y-3 overflow-y-auto p-2" aria-label="Navegação principal">
+      {/*
+        A DENSIDADE É MEDIDA, NÃO ESTÉTICA.
+
+        O e2e `navegacao.spec.ts` exige que o menu inteiro caiba em 1280×900 sem
+        rolar — porque um grupo abaixo da dobra é indistinguível de um grupo que
+        não existe. Com 18 links a margem era de ~4px: a tela nova de Produtos
+        estourou a dobra por uma linha, e reprovou no CI.
+
+        `py-1.5` → `py-1` (linha de 32px para 28px) e o intervalo entre grupos de
+        12px para 8px devolvem ~90px — folga para o próximo item, em vez de
+        deixar a próxima tela nova repetir esta corrida.
+
+        ⚠️ Isto é remendo de densidade, não conserto estrutural. O menu vai
+        estourar de novo: a saída existente é o HUB (o grupo IA já a usa — nove
+        das treze telas dele moram atrás do "Ver tudo em IA"), e o CRM ainda não
+        tem um. Quando o quinto destino de CRM aparecer, é hub que se cria, não
+        mais 4px que se raspa.
+
+        ✅ O QUINTO APARECEU, e a promessa foi paga. Tarefas (PR #546) levou o
+        CRM a cinco telas e a dobra estourou em 13px — medido em 1280×900,
+        `scrollHeight` 776 contra 763 de altura. O conserto foi `/app/crm`, o
+        hub do grupo: Produtos e Etapas do funil saíram do menu para dentro
+        dele, e nenhum valor deste arquivo mudou por causa disso.
+
+        Fica valendo o mesmo, agora para o próximo grupo: com hub em CRM, IA e
+        Organização, tela nova de qualquer um dos três não pressiona mais o
+        menu. Quem pressionar é um grupo SEM hub — Atendimento (4), Canais (3)
+        ou Análise (3). Quando um deles passar de quatro, a resposta é a mesma:
+        cria-se o hub, não se raspa densidade.
+
+        ✅ ANÁLISE FOI A SEGUINTE, e a regra valeu igual. Atividades (PR #583)
+        levou o grupo a cinco telas e a dobra estourou de novo — medido em
+        1280×900, logado como admin: `scrollHeight` 776 contra 763 de altura
+        visível, 13px de excesso, com o link "Audit Log" 13px abaixo da caixa de
+        conteúdo da nav. O conserto foi `/app/analise`, o hub do grupo: Evolução
+        da IA e Audit Log saíram do menu para dentro dele, e NENHUM valor deste
+        arquivo mudou por causa disso. Sobrou 19px de folga — a mesma que havia
+        antes de Atividades chegar.
+
+        Ficam sem hub Atendimento e Canais (4 e 2 destinos quando isto foi
+        medido) — em qualquer um deles, o quinto destino é que cria o hub, nunca
+        mais densidade raspada. A conta é fechada e vale conferir antes de abrir
+        o PR: cada linha custa 32px (28px de altura + 4px de `space-y-1`), e
+        trocar N destinos do menu por um único link de hub devolve (N-1)×32px.
+      */}
+      <nav className="flex-1 space-y-2 overflow-y-auto p-2" aria-label={t("Navegação principal")}>
         {grupos.map(({ group, items }) => {
           const tituloId = `nav-grupo-${group.id}`;
+          // Recolhido o sidebar inteiro (rail de 64px), o grupo sempre mostra
+          // seus itens — não há onde desenhar cabeçalho nem seta para fechá-lo.
+          const aberto = collapsed || !gruposFechados.has(group.id);
           return (
             <div key={group.id} className="space-y-1">
               {/* Colapsado, o sidebar tem 64px: seis rótulos ali seriam ilegíveis.
@@ -125,90 +247,111 @@ export function SidebarContent({
               {collapsed ? (
                 <div aria-hidden className="mx-2 border-t first:hidden" />
               ) : (
-                <h2
-                  id={tituloId}
-                  className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60"
-                >
-                  {t(group.label)}
+                <h2 id={tituloId}>
+                  <button
+                    type="button"
+                    onClick={() => toggleGrupo(group.id)}
+                    aria-expanded={aberto}
+                    className="flex w-full items-center justify-between rounded-md px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+                  >
+                    {t(group.label)}
+                    <CaretDown
+                      size={12}
+                      weight="bold"
+                      className={cn(
+                        "shrink-0 text-text-subtle transition-transform",
+                        !aberto && "-rotate-90",
+                      )}
+                      aria-hidden
+                    />
+                  </button>
                 </h2>
               )}
-              <ul aria-labelledby={collapsed ? undefined : tituloId} aria-label={collapsed ? t(group.label) : undefined} className="space-y-1">
-                {items.map((item) => {
-                  const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
-                  const Icon = item.icon;
-                  return (
-                    <li key={item.href}>
+              {aberto && (
+                <ul
+                  aria-labelledby={collapsed ? undefined : tituloId}
+                  aria-label={collapsed ? t(group.label) : undefined}
+                  className="space-y-1"
+                >
+                  {items.map((item) => {
+                    const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
+                    const Icon = item.icon;
+                    return (
+                      <li key={item.href}>
+                        <Link
+                          href={item.href}
+                          title={collapsed ? t(item.label) : undefined}
+                          aria-current={isActive ? "page" : undefined}
+                          onClick={onNavigate}
+                          className={cn(
+                            "relative flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
+                            isActive
+                              ? "bg-accent text-accent-foreground"
+                              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                            collapsed && "justify-center px-2",
+                          )}
+                        >
+                          <Icon size={18} weight={isActive ? "fill" : "regular"} aria-hidden />
+                          {!collapsed && <span className="truncate">{t(item.label)}</span>}
+                          {item.healthDot && (
+                            <ConnectionHealthDot
+                              className={cn(collapsed ? "absolute top-1.5 right-1.5" : "ml-auto")}
+                            />
+                          )}
+                          {item.contador === "casos" && <ContadorDeCasos compacto={collapsed} />}
+                          {item.contador === "fila" && <ContadorDaFila compacto={collapsed} />}
+                        </Link>
+                      </li>
+                    );
+                  })}
+                  {group.hub && (
+                    <li>
                       <Link
-                        href={item.href}
-                        title={collapsed ? t(item.label) : undefined}
-                        aria-current={isActive ? "page" : undefined}
+                        href={group.hub.href}
+                        title={collapsed ? t(group.hub.label) : undefined}
+                        aria-current={pathname === group.hub.href ? "page" : undefined}
                         onClick={onNavigate}
                         className={cn(
-                          "relative flex items-center gap-3 rounded-md px-3 py-1.5 text-sm transition-colors",
-                          isActive
+                          "flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
+                          pathname === group.hub.href
                             ? "bg-accent text-accent-foreground"
                             : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
                           collapsed && "justify-center px-2",
                         )}
                       >
-                        <Icon size={18} weight={isActive ? "fill" : "regular"} aria-hidden />
-                        {!collapsed && <span className="truncate">{t(item.label)}</span>}
-                        {item.healthDot && (
-                          <ConnectionHealthDot
-                            className={cn(collapsed ? "absolute right-1.5 top-1.5" : "ml-auto")}
-                          />
-                        )}
+                        <ArrowRight size={18} aria-hidden />
+                        {!collapsed && <span className="truncate">{t(group.hub.label)}</span>}
                       </Link>
                     </li>
-                  );
-                })}
-                {group.hub && (
-                  <li>
-                    <Link
-                      href={group.hub.href}
-                      title={collapsed ? t(group.hub.label) : undefined}
-                      aria-current={pathname === group.hub.href ? "page" : undefined}
-                      onClick={onNavigate}
-                      className={cn(
-                        "flex items-center gap-3 rounded-md px-3 py-1.5 text-sm transition-colors",
-                        pathname === group.hub.href
-                          ? "bg-accent text-accent-foreground"
-                          : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-                        collapsed && "justify-center px-2",
-                      )}
-                    >
-                      <ArrowRight size={18} aria-hidden />
-                      {!collapsed && <span className="truncate">{t(group.hub.label)}</span>}
-                    </Link>
-                  </li>
-                )}
-              </ul>
+                  )}
+                </ul>
+              )}
             </div>
           );
         })}
-        {activeOrg?.orgId === NILSON_VEICULOS_ORG_ID && (
+        {activeOrg?.linkExtra && (
           <div className="space-y-1">
             {collapsed ? (
               <div aria-hidden className="mx-2 border-t" />
             ) : (
-              <h2 className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+              <h2 className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 Loja
               </h2>
             )}
             <ul className="space-y-1">
               <li>
                 <a
-                  href={NILSON_ESTOQUE_URL}
+                  href={activeOrg.linkExtra.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  title={collapsed ? "Estoque" : undefined}
+                  title={collapsed ? activeOrg.linkExtra.label : undefined}
                   className={cn(
                     "flex items-center gap-3 rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground",
                     collapsed && "justify-center px-2",
                   )}
                 >
                   <Storefront size={18} weight="regular" aria-hidden />
-                  {!collapsed && <span className="truncate">Estoque</span>}
+                  {!collapsed && <span className="truncate">{activeOrg.linkExtra.label}</span>}
                 </a>
               </li>
             </ul>
@@ -223,7 +366,7 @@ export function SidebarContent({
             aria-current={pathname.startsWith(rodape.href) ? "page" : undefined}
             onClick={onNavigate}
             className={cn(
-              "mb-1 flex items-center gap-3 rounded-md px-3 py-1.5 text-sm transition-colors",
+              "mb-1 flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
               pathname.startsWith(rodape.href)
                 ? "bg-accent text-accent-foreground"
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
@@ -231,7 +374,7 @@ export function SidebarContent({
             )}
           >
             <Gear size={18} aria-hidden />
-            {!collapsed && <span className="truncate">{rodape.label}</span>}
+            {!collapsed && <span className="truncate">{t(rodape.label)}</span>}
           </Link>
         )}
         <VersionFooter collapsed={collapsed} onNavigate={onNavigate} />
@@ -244,10 +387,14 @@ export function SidebarContent({
               "flex w-full items-center gap-2 rounded-md px-3 py-2 text-xs text-muted-foreground hover:bg-accent/50 hover:text-foreground",
               collapsed && "justify-center px-2",
             )}
-            aria-label={collapsed ? "Expandir sidebar" : "Recolher sidebar"}
+            aria-label={collapsed ? t("Expandir sidebar") : t("Recolher sidebar")}
           >
-            {collapsed ? <CaretDoubleRight size={14} aria-hidden /> : <CaretDoubleLeft size={14} aria-hidden />}
-            {!collapsed && <span>Recolher</span>}
+            {collapsed ? (
+              <CaretDoubleRight size={14} aria-hidden />
+            ) : (
+              <CaretDoubleLeft size={14} aria-hidden />
+            )}
+            {!collapsed && <span>{t("Recolher")}</span>}
           </button>
         )}
       </div>

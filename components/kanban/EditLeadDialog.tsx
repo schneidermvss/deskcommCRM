@@ -2,6 +2,8 @@
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
+import { useActiveOrg } from "@/hooks/auth/AuthProvider";
+import { useT } from "@/hooks/i18n/useT";
 import {
   Dialog,
   DialogContent,
@@ -17,7 +19,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useEditLead } from "@/hooks/kanban/useUpdateLead";
 import type { Lead } from "@/lib/types/leads";
 import { updateLeadSchema, type UpdateLeadInput } from "@/lib/schemas/leads";
-import { parseReaisToCents } from "@/lib/money";
+import { MOEDA_PADRAO, parseReaisToCents, simboloDaMoeda } from "@/lib/money";
 import { EcoDoValor } from "./EcoDoValor";
 
 interface FormShape {
@@ -41,6 +43,11 @@ function centsToReais(cents: number | null | undefined): string {
 }
 
 export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) {
+  const t = useT();
+  const org = useActiveOrg();
+  // A moeda do negócio JÁ GRAVADO vence: trocar a moeda da empresa não
+  // reescreve o que nasceu antes, e o cartão e o dossiê mostram a persistida.
+  const moedaDoValor = lead.currency ?? org?.currency ?? MOEDA_PADRAO;
   const edit = useEditLead(pipelineId);
 
   const form = useForm<FormShape>({
@@ -77,7 +84,7 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
     if (reais.length > 0) {
       valueCents = parseReaisToCents(reais);
       if (valueCents === null) {
-        form.setError("valueReais", { message: "Valor inválido" });
+        form.setError("valueReais", { message: t("Valor inválido") });
         return;
       }
     }
@@ -93,7 +100,7 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
     const parsed = updateLeadSchema.safeParse(patch);
     if (!parsed.success) {
       const first = parsed.error.issues[0];
-      toast.error(first?.message ?? "Dados inválidos");
+      toast.error(first?.message ?? t("Dados inválidos"));
       return;
     }
 
@@ -102,7 +109,7 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
         leadId: lead.id,
         patch: parsed.data as UpdateLeadInput,
       });
-      toast.success("Lead atualizado");
+      toast.success(t("Lead atualizado"));
       onOpenChange(false);
     } catch {
       // toast already shown
@@ -113,15 +120,14 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Editar lead</DialogTitle>
+          <DialogTitle>{t("Editar lead")}</DialogTitle>
           <DialogDescription>
-            Atualize os campos. Mover de etapa ou marcar ganho/perdido tem opções
-            próprias.
+            {t("Atualize os campos. Mover de etapa ou marcar ganho/perdido tem opções próprias.")}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="title">Título</Label>
+            <Label htmlFor="title">{t("Título")}</Label>
             <Input
               id="title"
               {...form.register("title", { required: true, minLength: 2 })}
@@ -129,20 +135,22 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="description">Descrição</Label>
+            <Label htmlFor="description">{t("Descrição")}</Label>
             <Textarea id="description" rows={3} {...form.register("description")} />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <Label htmlFor="valueReais">Valor (R$)</Label>
+              {/* O rótulo segue a moeda do NEGÓCIO (a organização é a reserva):
+                  `R$` em duro mentia para quem opera em euro. */}
+              <Label htmlFor="valueReais">{t("Valor")} ({simboloDaMoeda(moedaDoValor)})</Label>
               <Input
                 id="valueReais"
                 inputMode="decimal"
                 placeholder="0,00"
                 {...form.register("valueReais")}
               />
-              <EcoDoValor control={form.control} />
+              <EcoDoValor control={form.control} moeda={moedaDoValor} />
               {form.formState.errors.valueReais && (
                 <p className="text-xs text-error-fg">
                   {form.formState.errors.valueReais.message}
@@ -150,7 +158,7 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
               )}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="expected_close_date">Fechamento previsto</Label>
+              <Label htmlFor="expected_close_date">{t("Fechamento previsto")}</Label>
               <Input
                 id="expected_close_date"
                 type="date"
@@ -160,7 +168,7 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="tagsRaw">Tags (separadas por vírgula)</Label>
+            <Label htmlFor="tagsRaw">{t("Tags (separadas por vírgula)")}</Label>
             <Input id="tagsRaw" placeholder="vip, recompra" {...form.register("tagsRaw")} />
           </div>
 
@@ -171,10 +179,10 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
               onClick={() => onOpenChange(false)}
               disabled={edit.isPending}
             >
-              Cancelar
+              {t("Cancelar")}
             </Button>
             <Button type="submit" disabled={edit.isPending}>
-              {edit.isPending ? "Salvando…" : "Salvar"}
+              {edit.isPending ? t("Salvando…") : t("Salvar")}
             </Button>
           </DialogFooter>
         </form>

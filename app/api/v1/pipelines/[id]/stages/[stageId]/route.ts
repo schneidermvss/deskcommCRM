@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * PATCH/DELETE /api/v1/pipelines/[id]/stages/[stageId] — renomear, marcar
  * ganho/perda, reordenar e arquivar uma etapa.
@@ -23,6 +24,7 @@ import { fail, ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { arquivarEtapa, atualizarEtapa } from "@/lib/leads/stage-operations";
 import { createClient } from "@/lib/supabase/server";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -42,14 +44,27 @@ const bodySchema = z
     is_won: z.boolean().optional(),
     is_lost: z.boolean().optional(),
     depois_de: z.string().min(1).nullable().optional(),
+    /**
+     * Probabilidade de ganho da etapa, 0–100 (migration 0426). `null` limpa a
+     * calibração — e a previsão passa a reportar a etapa no balde "sem
+     * probabilidade". O CHECK do banco é a rede de segurança; recusar aqui é
+     * para a mensagem sair em português, antes de tocar no banco.
+     */
+    win_probability: z.number().int().min(0).max(100).nullable().optional(),
+    /** Negócio que entra nesta etapa abre um aviso na Central (migration 0440). */
+    avisar_na_central: z.boolean().optional(),
   })
   .strict()
   .refine((b) => Object.keys(b).length > 0, { message: "Nada para alterar." });
 
 export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("manager", { requestId, resource: "crm_stages" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
 
   const { id: pipelineId, stageId } = await ctx.params;
 
@@ -57,12 +72,12 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
   try {
     json = await req.json();
   } catch {
-    return fail("invalid_request", "Corpo não é JSON válido.", 400, { requestId });
+    return fail("invalid_request", t("Corpo não é JSON válido."), 400, { requestId });
   }
 
   const parsed = bodySchema.safeParse(json);
   if (!parsed.success) {
-    return fail("unprocessable_entity", "Não entendi o que mudar nesta etapa.", 422, {
+    return fail("unprocessable_entity", t("Não entendi o que mudar nesta etapa."), 422, {
       requestId,
       details: parsed.error.flatten(),
     });
@@ -86,6 +101,9 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
 }
 
 export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("manager", { requestId, resource: "crm_stages" });
   if (!authz.ok) return authz.response;

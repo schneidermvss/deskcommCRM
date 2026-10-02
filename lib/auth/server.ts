@@ -1,3 +1,5 @@
+import { cache } from "react";
+import { combinarInterfaces } from "@/lib/navigation/interface";
 /**
  * Server-side auth helpers — load AuthUser, resolve active org, gate routes.
  *
@@ -6,21 +8,88 @@
  * intentional here because we resolve the user from the validated JWT first
  * and then filter by `user_id` (a trusted source).
  */
-import { cache } from "react";
+import { readSupportContext } from "@/lib/impersonate/support";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { logger } from "@/lib/logger";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { empresaExigeMfa, exigeCadastroDeMfa } from "@/lib/auth/politica-mfa";
+import { normalizarIdioma } from "@/lib/i18n/idiomas";
+import { STATUS_OPERANTE, ehOperante } from "@/lib/organizacao/operante";
 import type { AuthUser, Role, UserOrgMembership, ActiveOrg } from "./types";
 
 const ACTIVE_ORG_COOKIE = "active_org";
 
 interface RawMembershipRow {
+  interface_settings?: unknown;
   organization_id: string;
   role: string;
-  organizations: { display_name: string } | { display_name: string }[] | null;
+  /** Só para ORDENAR — a lista decide qual organização fica ativa sem cookie. */
+  accepted_at?: string | null;
+  organizations: OrgJoin | OrgJoin[] | null;
+  /**
+   * As portas da EMPRESA, por embed PRÓPRIO (`organizations.interface_settings`,
+   * migration 0367). Ficam fora de `organizations(display_name, locale)` de
+   * propósito: aquele embed é o que a membership SEMPRE trouxe — nome e IDIOMA da
+   * empresa, lidos em toda navegação — e um jsonb novo ali faria a escolha de menu
+   * mexer no caminho de quem só precisa saber em que língua desenhar a tela.
+   */
+  interface_da_empresa: OrgJoinEmpresa | OrgJoinEmpresa[] | null;
+}
+
+interface OrgJoin {
+  display_name: string;
+  locale: string | null;
+  timezone: string | null;
+  currency: string | null;
+  country: string | null;
+  status?: string;
+  suspended_kind?: string | null;
+}
+
+/** O mesmo `organizations`, alcançado por outro embed: só as portas da EMPRESA. */
+interface OrgJoinEmpresa {
+  interface_settings?: unknown;
+}
+
+/**
+ * O idioma padrão da organização ativa — `null` se não há organização.
+ */
+async function localeDaOrgAtiva(memberships: UserOrgMembership[]): Promise<string | null> {
+  if (memberships.length === 0) return null;
+  const store = await cookies();
+  return escolherMembroAtivo(memberships, store.get(ACTIVE_ORG_COOKIE)?.value)?.locale ?? null;
+}
+
+/**
+ * Qual organização está ativa, dado o cookie.
+ *
+ * Extraída porque DUAS coisas precisam da mesma resposta e não podem divergir:
+ * `resolveActiveOrg`, que decide o escopo dos dados, e a resolução do idioma
+ * dentro de `loadAuthUser`. Se cada uma escolhesse por conta, dava para ver os
+ * dados de uma empresa com a interface no idioma de outra.
+ *
+ * ⚠️ O `memberships[0]` do fim só é uma ESCOLHA porque quem monta `memberships`
+ * ordena a consulta (`accepted_at`, depois `organization_id`). Sem aquele
+ * `ORDER BY`, isto aqui é um sorteio — e desde que o idioma passou a vir junto
+ * da organização ativa, o sorteio decide TAMBÉM em que língua o sistema abre.
+ * As duas coisas andam juntas: não tire a ordenação de lá sem resolver isto.
+ */
+function escolherMembroAtivo(
+  memberships: UserOrgMembership[],
+  cookieOrg: string | undefined,
+): UserOrgMembership | null {
+  if (memberships.length === 0) return null;
+  if (cookieOrg) {
+    // Com cookie, MANTÉM mesmo a suspensa: é por ela que a pessoa chega ao hub
+    // `/account-suspended` para pagar, pedir LGPD ou trocar de empresa.
+    const achado = memberships.find((o) => o.organization_id === cookieOrg);
+    if (achado) return achado;
+  }
+  // Sem cookie, a primeira OPERANTE na mesma ordem (`accepted_at`,
+  // `organization_id`); a primeira de todas só quando nenhuma opera.
+  return memberships.find((o) => ehOperante(o.org_status)) ?? memberships[0] ?? null;
 }
 
 /**
@@ -59,20 +128,7 @@ export function ehSessaoAusente(error: { name?: string } | null | undefined): bo
   return error?.name === "AuthSessionMissingError";
 }
 
-/**
- * `loadAuthUser` é `cache()`-envolvida logo abaixo desta definição — chamada
- * do middleware, do layout de `/app` e de cinco páginas diferentes, ela
- * pagava a MESMA ida ao Supabase (getUser + duas consultas) uma vez POR
- * CHAMADOR na mesma requisição, sem nenhum compartilhamento entre elas. Numa
- * VPS fora da região do banco (EUA↔São Paulo, ~250-500ms por ida), essa
- * repetição é o que empurrava `/app` para os ~2-3s onde o navegador cancela a
- * requisição (o "reading: context canceled" que aparece como 502 no Caddy).
- * `React.cache()` memoiza por REQUISIÇÃO (não entre requisições, e não é o
- * memo com TTL de `lib/branding/instalacao.ts` — este some ao fim do render),
- * então a segunda chamada e as seguintes, na mesma requisição, não tocam a
- * rede.
- */
-async function loadAuthUserSemCache(): Promise<AuthUser | null> {
+export const loadAuthUser = cache(async (): Promise<AuthUser | null> => {
   const supabase = await createClient();
   const {
     data: { user },
@@ -117,35 +173,36 @@ async function loadAuthUserSemCache(): Promise<AuthUser | null> {
   }
   if (!user) return null;
 
-  // Platform admin? (active = no revoked_at). RLS returns null for non-admins.
-  //
-  // ⚠️ O erro é capturado de propósito: aqui `data: null` é AMBÍGUO — significa tanto
-  // "não é platform admin" (RLS filtrou, estado normal) quanto "a query falhou".
-  // Sem separar os dois, um banco instável rebaixa silenciosamente um super-admin.
-  //
-  // As duas consultas rodam em PARALELO (`Promise.all`): nenhuma lê o resultado
-  // da outra, e numa VPS fora da região do banco (o custo medido é EUA↔São
-  // Paulo) cada ida sequencial soma centenas de ms — a diferença entre elas
-  // rodarem em série ou juntas é o tipo de coisa que empurra `/app` para o
-  // território onde o navegador cancela a requisição (ver o 502 de
-  // "context canceled" no Caddy, correlacionado a este caminho).
-  const [
-    { data: paRow, error: paErro },
-    { data: rawMemberships, error: membErro },
-  ] = await Promise.all([
-    supabase
-      .from("platform_admins")
-      .select("user_id, revoked_at")
-      .eq("user_id", user.id)
-      .is("revoked_at", null)
-      .maybeSingle(),
-    // Org memberships (only active = not revoked, accepted)
-    supabase
-      .from("user_organizations")
-      .select("organization_id, role, organizations(display_name)")
-      .eq("user_id", user.id)
-      .is("revoked_at", null),
-  ]);
+  // Platform admin e Org memberships consultados em paralelo no Supabase:
+  // elimina round-trip sequencial a cada requisição.
+  // ⚠️ `ORDER BY` NÃO É ENFEITE AQUI: esta lista decide QUAL ORGANIZAÇÃO FICA
+  // ATIVA para quem não tem o cookie `active_org` — `resolveActiveOrg` pega
+  // `organizations[0]`. Sem ordenação, "a primeira" é o que o Postgres devolver.
+  const [{ data: paRow, error: paErro }, { data: rawMemberships, error: membErro }] =
+    await Promise.all([
+      supabase
+        .from("platform_admins")
+        .select("user_id, scope, revoked_at")
+        .eq("user_id", user.id)
+        .is("revoked_at", null)
+        .maybeSingle(),
+      supabase
+        .from("user_organizations")
+        .select(
+          // Dois embeds do MESMO `organizations`, como manda o PostgREST quando a
+          // mesma relação aparece duas vezes: `organizations(...)` continua sendo
+          // o que a membership sempre trouxe (nome, IDIOMA e FUSO da empresa — o
+          // idioma decide a tela inteira e não pode depender de um embed que a
+          // issue #1341 acabou de engordar), e o alias traz só as portas da EMPRESA.
+          // `timezone` veio do main (fuso da organização nas listas, #1290) e convive
+          // com o alias: um embed por relação, sem renomear o que já existia.
+          "organization_id, role, interface_settings, accepted_at, organizations(display_name, locale, timezone, currency, country, status, suspended_kind), interface_da_empresa:organizations(interface_settings)",
+        )
+        .eq("user_id", user.id)
+        .is("revoked_at", null)
+        .order("accepted_at", { ascending: true, nullsFirst: true })
+        .order("organization_id", { ascending: true }),
+    ]);
 
   /**
    * FALHA ALTO, não baixo.
@@ -182,17 +239,41 @@ async function loadAuthUserSemCache(): Promise<AuthUser | null> {
   const rows = (rawMemberships ?? []) as RawMembershipRow[];
   const memberships: UserOrgMembership[] = rows.map((row) => {
     const orgs = row.organizations;
-    const name = Array.isArray(orgs) ? (orgs[0]?.display_name ?? "—") : (orgs?.display_name ?? "—");
+    const org = Array.isArray(orgs) ? (orgs[0] ?? null) : orgs;
+    const empresas = row.interface_da_empresa;
+    const empresa = Array.isArray(empresas) ? (empresas[0] ?? null) : empresas;
     return {
       organization_id: row.organization_id,
-      organization_name: name,
+      organization_name: org?.display_name ?? "—",
       role: row.role as Role,
+      // EMPRESA ∩ VÍNCULO (migration 0367): a empresa escolhe o universo de
+      // portas da instalação, o vínculo escolhe menos dentro dele. Até aqui o
+      // vínculo decidia sozinho, então a escolha da empresa não existia.
+      interface_settings: combinarInterfaces(empresa?.interface_settings, row.interface_settings),
+      locale: org?.locale ?? null,
+      timezone: org?.timezone ?? null,
+      currency: org?.currency ?? null,
+      country: org?.country ?? null,
+      org_status: org?.status ?? null,
+      suspended_kind: org?.suspended_kind ?? null,
     };
   });
 
+  const support = await readSupportContext(supabase);
   const fullName = (user.user_metadata?.full_name as string | undefined) ?? null;
   const avatarUrl = (user.user_metadata?.avatar_url as string | undefined) ?? null;
   const locale = (user.user_metadata?.locale as string | undefined) ?? null;
+  // A cadeia inteira num lugar só: pessoa → organização ativa → padrão. Quem
+  // consome pede `idioma` e não precisa saber que existe uma ordem.
+  //
+  // O cookie só é lido quando a resposta DEPENDE dele: quem já tem preferência
+  // própria, e quem não pertence a organização nenhuma, não têm o que resolver.
+  // Ler assim mesmo faria toda tela do produto tocar o cookie para descartar o
+  // valor em seguida.
+  const idioma = normalizarIdioma(
+    locale ?? support?.locale ?? (await localeDaOrgAtiva(memberships)),
+  );
+  const timezone = (user.user_metadata?.timezone as string | undefined) ?? null;
 
   return {
     id: user.id,
@@ -200,32 +281,85 @@ async function loadAuthUserSemCache(): Promise<AuthUser | null> {
     full_name: fullName,
     avatar_url: avatarUrl,
     is_platform_admin: !!paRow,
+    platform_admin_scope: paRow?.scope ?? null,
     locale,
+    idioma,
+    timezone,
     organizations: memberships,
+    support,
   };
-}
+});
 
-export const loadAuthUser = cache(loadAuthUserSemCache);
+/**
+ * A organização ativa SEM o portão de suspensão — o corpo que `resolveActiveOrg`
+ * tinha até a spec da cobrança (§4, item 3).
+ *
+ * Só para quem PRECISA enxergar a org parada: `requireRole` (responde 403
+ * `org_suspended` em JSON, não 307), o hub `/account-suspended`, leitura que não
+ * pode sumir para o suspenso (`lib/legal/operador.ts`) e o início de um
+ * acompanhamento, que só guarda para onde voltar (`admin/tenants/[id]/impersonate`).
+ * Rota de API usa `orgAtivaDaApi` (lib/auth/require-role.ts: 403 JSON); o resto,
+ * `resolveActiveOrg`.
+ */
+export const orgAtivaSemPortao = cache(async (authUser: AuthUser): Promise<ActiveOrg | null> => {
+  if (authUser.support) {
+    if (authUser.support.status !== "active") redirect("/support-ended");
+    // Acompanhamento não tem membership, e era por isso que este caminho
+    // devolvia a organização PELADA: sem fuso, e agora sem moeda nem país. A
+    // tela então caía nos padrões e mostrava `R$` dentro de uma empresa em
+    // euro — o mesmo defeito que este conserto ataca, por outra porta. Uma
+    // leitura por id, só nas sessões de acompanhamento; falha degrada para o
+    // que havia antes, porque perder o acesso de suporte é pior que um símbolo
+    // errado.
+    const { data: orgDoSuporte } = await createAdminClient()
+      .from("organizations")
+      .select("timezone, currency, country")
+      .eq("id", authUser.support.organization_id)
+      .maybeSingle();
+    return {
+      orgId: authUser.support.organization_id,
+      name: authUser.support.name,
+      role: authUser.support.access_mode === "full" ? "admin" : "viewer",
+      timezone: orgDoSuporte?.timezone ?? null,
+      currency: orgDoSuporte?.currency ?? null,
+      country: orgDoSuporte?.country ?? null,
+      // `fn_support_context` só devolve status 'active' com a org em 'active'
+      // (`o.status <> 'active'` vira 'revoked'), e a linha acima já saiu.
+      org_status: STATUS_OPERANTE,
+      suspended_kind: null,
+    };
+  }
+  const store = await cookies();
+  const ativo = escolherMembroAtivo(authUser.organizations, store.get(ACTIVE_ORG_COOKIE)?.value);
+  if (!ativo) return null;
+  return {
+    orgId: ativo.organization_id,
+    name: ativo.organization_name,
+    role: ativo.role,
+    interface_settings: ativo.interface_settings,
+    timezone: ativo.timezone ?? null,
+    currency: ativo.currency ?? null,
+    country: ativo.country ?? null,
+    org_status: ativo.org_status ?? null,
+    suspended_kind: ativo.suspended_kind ?? null,
+  };
+});
 
 /**
  * Resolves the active organization for the current request.
- * Priority: cookie `active_org` (if member of) → first membership.
+ * Priority: cookie `active_org` (if member of) → first OPERANT membership → first.
  * Returns null if user has zero memberships.
+ *
+ * Org NÃO operante redireciona para `/account-suspended` (mesmo precedente do
+ * `/support-ended`). É isto que fecha páginas, layouts e server actions de uma vez.
+ * NUNCA em rota de API (`app/api/**`): o `fetch` seguiria o 307 para HTML — lá
+ * é `orgAtivaDaApi` (cerca `tests/unit/api-nao-redireciona-org-suspensa.test.ts`).
  */
-export async function resolveActiveOrg(authUser: AuthUser): Promise<ActiveOrg | null> {
-  if (authUser.organizations.length === 0) return null;
-  const store = await cookies();
-  const cookieOrg = store.get(ACTIVE_ORG_COOKIE)?.value;
-  if (cookieOrg) {
-    const found = authUser.organizations.find((o) => o.organization_id === cookieOrg);
-    if (found) {
-      return { orgId: found.organization_id, name: found.organization_name, role: found.role };
-    }
-  }
-  const first = authUser.organizations[0];
-  if (!first) return null;
-  return { orgId: first.organization_id, name: first.organization_name, role: first.role };
-}
+export const resolveActiveOrg = cache(async (authUser: AuthUser): Promise<ActiveOrg | null> => {
+  const org = await orgAtivaSemPortao(authUser);
+  if (org && !ehOperante(org.org_status)) redirect("/account-suspended");
+  return org;
+});
 
 /**
  * For Server Components / Server Actions in /app/(app)/* routes — guarantees
@@ -240,12 +374,20 @@ export async function requireAuth(): Promise<AuthUser> {
 /**
  * Returns true if the current session has at least one verified TOTP factor.
  * Use only in Server Components / Server Actions (cookie session).
+ *
+ * LANÇA quando não conseguiu ler os fatores. O `listFactors()` do auth-js não
+ * lança: ele chama `getUser()` pela rede e, se falhar, DEVOLVE
+ * `{ data: null, error }`. Ler só `data` transformava essa falha em "não tem
+ * fator" — e `mfaEmDivida` liberava a sessão `aal1` de quem TEM fator. Uma
+ * leitura que não aconteceu não pode virar resposta: quem decide acesso falha
+ * fechado (a exceção vira 500 na rota, nunca 200).
  */
-export async function isMfaEnrolled(): Promise<boolean> {
+export const isMfaEnrolled = cache(async (): Promise<boolean> => {
   const supabase = await createClient();
-  const { data } = await supabase.auth.mfa.listFactors();
+  const { data, error } = await supabase.auth.mfa.listFactors();
+  if (error) throw error;
   return !!data?.totp?.some((f) => f.status === "verified");
-}
+});
 
 /**
  * Quem é OBRIGADO a cadastrar a verificação em duas etapas.
@@ -265,37 +407,39 @@ export async function isMfaEnrolled(): Promise<boolean> {
  * Carrega as duas leituras porque o layout precisa delas de qualquer forma; quem
  * já tem a política em mãos deve chamar `exigeCadastroDeMfa` direto.
  */
-export async function requiresMfa(
-  role: Role | undefined,
-  isPlatformAdmin: boolean,
-  userId?: string,
-  orgId?: string,
-): Promise<boolean> {
-  const admin = createAdminClient();
+export const requiresMfa = cache(
+  async (
+    role: Role | undefined,
+    isPlatformAdmin: boolean,
+    userId?: string,
+    orgId?: string,
+  ): Promise<boolean> => {
+    const admin = createAdminClient();
 
-  let plataformaExige: boolean | null = null;
-  if (isPlatformAdmin && userId) {
-    const { data } = await admin
-      .from("platform_admins")
-      .select("mfa_required")
-      .eq("user_id", userId)
-      .is("revoked_at", null)
-      .maybeSingle();
-    plataformaExige = (data?.mfa_required as boolean | undefined) ?? null;
-  }
+    let plataformaExige: boolean | null = null;
+    if (isPlatformAdmin && userId) {
+      const { data } = await admin
+        .from("platform_admins")
+        .select("mfa_required")
+        .eq("user_id", userId)
+        .is("revoked_at", null)
+        .maybeSingle();
+      plataformaExige = (data?.mfa_required as boolean | undefined) ?? null;
+    }
 
-  let empresaExige = false;
-  if (orgId) {
-    const { data } = await admin
-      .from("organizations")
-      .select("settings")
-      .eq("id", orgId)
-      .maybeSingle();
-    empresaExige = empresaExigeMfa(data?.settings);
-  }
+    let empresaExige = false;
+    if (orgId) {
+      const { data } = await admin
+        .from("organizations")
+        .select("settings")
+        .eq("id", orgId)
+        .maybeSingle();
+      empresaExige = empresaExigeMfa(data?.settings);
+    }
 
-  return exigeCadastroDeMfa({ role, isPlatformAdmin, plataformaExige, empresaExige });
-}
+    return exigeCadastroDeMfa({ role, isPlatformAdmin, plataformaExige, empresaExige });
+  },
+);
 
 /**
  * Nível de garantia da SESSÃO atual: `aal2` = o segundo fator foi provado nesta

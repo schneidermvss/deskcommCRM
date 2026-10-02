@@ -172,7 +172,7 @@ function AbaComandos() {
               value={squad}
               onChange={(e) => setSquad(e.target.value)}
               placeholder="nome do squad"
-              className="h-10 flex-1 rounded-sm border border-border bg-bg px-3 text-sm text-text placeholder:text-text-muted focus-visible:outline-none focus-visible:border-accent-500 focus-visible:ring-2 focus-visible:ring-accent-soft"
+              className="h-10 flex-1 rounded-sm border border-border bg-bg px-3 text-sm text-text placeholder:text-text-muted focus-visible:outline-hidden focus-visible:border-accent-500 focus-visible:ring-2 focus-visible:ring-accent-soft"
             />
           </div>
           <Textarea

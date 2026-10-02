@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET /api/v1/channel-sessions/[id]/qr — proxy do QR de UM canal específico.
  *
@@ -22,7 +23,8 @@
  */
 import { NextResponse } from "next/server";
 
-import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
+import { loadAuthUser } from "@/lib/auth/server";
+import { orgAtivaDaApi } from "@/lib/auth/require-role";
 import { ARCHIVED_AT, queryTolerantToMissingArchived } from "@/lib/channels/archived";
 import { createClient } from "@/lib/supabase/server";
 
@@ -32,11 +34,15 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
   const { id } = await params;
 
   const user = await loadAuthUser();
   if (!user) return new NextResponse(null, { status: 401 });
-  const activeOrg = await resolveActiveOrg(user);
+  const ativa = await orgAtivaDaApi(user);
+  if (!ativa.ok) return ativa.response;
+  const activeOrg = ativa.org;
   if (!activeOrg) return new NextResponse(null, { status: 403 });
 
   const supabase = await createClient();

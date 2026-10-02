@@ -1,13 +1,12 @@
 "use client";
 /**
- * CustomFieldsEditor — scaffolded for EPIC-09/10 follow-ups.
- *
- * Reads `crm_pipelines.settings.fields[]` declarative schema and renders the
- * appropriate input per field type. NOT WIRED to any page yet — the consumer
- * (lead detail / contact detail) plugs it in once pipelines have published
- * field schemas.
+ * CustomFieldsEditor — lê `crm_pipelines.settings.fields[]` e renderiza o
+ * input certo por tipo. Usado pelo dossiê e pelo painel do inbox, via
+ * `LeadFieldsForm`.
  */
+import { useActiveOrg } from "@/hooks/auth/AuthProvider";
 import { Input } from "@/components/ui/input";
+import { perfilDoPais } from "@/lib/legal/perfil-do-pais";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -18,6 +17,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { useT } from "@/hooks/i18n/useT";
+import { cn } from "@/lib/utils";
 
 export type CustomFieldType =
   | "text"
@@ -45,15 +46,20 @@ interface Props {
   onChange: (next: Record<string, unknown>) => void;
   mode: "lead" | "contact";
   disabled?: boolean;
+  className?: string;
 }
 
-export function CustomFieldsEditor({ fields, value, onChange, disabled }: Props) {
+export function CustomFieldsEditor({ fields, value, onChange, disabled, className }: Props) {
+  const t = useT();
+  // O campo é do mesmo caminho do contato: o exemplo segue o país da
+  // organização, e não o DDI brasileiro em duro.
+  const telefoneExemplo = perfilDoPais(useActiveOrg()?.country).telefoneExemplo;
   function set(key: string, v: unknown) {
     onChange({ ...value, [key]: v });
   }
 
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+    <div className={cn("grid grid-cols-1 gap-4 md:grid-cols-2", className)}>
       {fields.map((f) => {
         const v = value[f.key];
         const id = `cf-${f.key}`;
@@ -116,7 +122,7 @@ export function CustomFieldsEditor({ fields, value, onChange, disabled }: Props)
                   disabled={disabled}
                 >
                   <SelectTrigger id={id}>
-                    <SelectValue placeholder="Selecione…" />
+                    <SelectValue placeholder={t("Selecione…")} />
                   </SelectTrigger>
                   <SelectContent>
                     {f.options?.map((o) => (
@@ -189,12 +195,12 @@ export function CustomFieldsEditor({ fields, value, onChange, disabled }: Props)
                 <Input
                   id={id}
                   type="tel"
-                  placeholder="+5511999998888"
+                  placeholder={telefoneExemplo}
                   value={typeof v === "string" ? v : ""}
                   onChange={(e) => set(f.key, e.target.value)}
                   disabled={disabled}
                 />
-                <p className="text-xs text-muted-foreground">Formato E.164</p>
+                <p className="text-xs text-muted-foreground">{t("Formato E.164")}</p>
               </div>
             );
           case "url":

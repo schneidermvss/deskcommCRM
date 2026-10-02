@@ -9,8 +9,17 @@ import { wahaContactPayload } from "@/lib/waha/contact-card";
 import { fetchWahaMedia } from "@/lib/messaging/media/waha-source";
 import { getWahaClient } from "@/lib/waha/client";
 import { wahaSendPlanFor } from "@/lib/waha/media-send";
-import { resolveWhatsappIdForContactCard } from "@/lib/waha/resolve-contact-whatsapp-id";
-import { bareWaMessageId, parseWahaMessageId } from "@/lib/waha/message-id";
+import {
+  resolveCanonicalCusChatId,
+  resolvePhoneJidDigitsForCall,
+  resolveWhatsappIdForContactCard,
+} from "@/lib/waha/resolve-contact-whatsapp-id";
+import {
+  bareWaMessageId,
+  chatIdFromWaMessageId,
+  parseWahaMessageId,
+  wahaEchoExternalIds,
+} from "@/lib/waha/message-id";
 import { resolveWahaChatId } from "@/lib/waha/send";
 import type { FetchedMedia } from "@/lib/messaging/media/types";
 import { DETALHE_CREDENCIAL_RECUSADA } from "../health";
@@ -35,6 +44,29 @@ export function statusHttpDoErroWaha(msg: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * O envio NOWEB grava só a cauda do id; o webhook grava o id completo. Quando o
+ * completo existe, ele também preserva o @lid original do chat — por isso ele
+ * vence o endereço resolvido a partir do contato.
+ */
+function enderecoDaMensagem(input: { recipient: string | null; externalId: string }) {
+  const client = getWahaClient();
+  if (!client) throw new Error("waha_not_configured");
+  const chatId = chatIdFromWaMessageId(input.externalId) ?? input.recipient;
+  if (!chatId) throw new Error("recipient_unavailable");
+  return { client, chatId, messageId: idCompletoDaMensagem(input.externalId, chatId) };
+}
+
+/**
+ * O id que a API do WAHA pede (editar, apagar, citar) é o COMPLETO. Só o que é
+ * nosso fica gravado bare — o envio e, desde o #1855, o eco do que o dono digitou
+ * no celular —, e o que é nosso é sempre `fromMe`, daí o `true_`. O inbound
+ * chega composto e passa intacto.
+ */
+function idCompletoDaMensagem(externalId: string, chatId: string): string {
+  return externalId.includes("_") ? externalId : `true_${chatId}_${bareWaMessageId(externalId)}`;
+}
+
 export const wahaAdapter: ChannelAdapter = {
   provider: "waha",
 
@@ -43,20 +75,13 @@ export const wahaAdapter: ChannelAdapter = {
   },
 
   /**
-   * As duas pontas do mesmo id, porque os engines gravam lados opostos:
-   *   NOWEB — o envio devolve o id cru (`3EB0…`) e o webhook manda o composto
-   *           `true_<chatId>_3EB0…`
-   *   WEBJS — os dois lados usam o `_serialized` completo
-   *
-   * Reduzir ao bare cobre o segundo caso; para o primeiro é preciso CONSTRUIR o
-   * composto a partir do destinatário — daí o `recipient`. Sem ele o par nunca
-   * contém a forma que o webhook realmente gravou.
-   *
-   * `true_` porque o eco de um envio nosso é sempre `fromMe`.
+   * As formas que o eco do nosso envio pode ter gravado. A regra mora em
+   * `wahaEchoExternalIds` (`lib/waha/message-id.ts`) porque o reenvio do watchdog
+   * precisa da MESMA resposta e não passa por este adaptador — o comentário de lá
+   * explica as duas pontas de cada engine.
    */
   echoExternalIds(input: { externalId: string; recipient: string }): string[] {
-    const bare = bareWaMessageId(input.externalId);
-    return [...new Set([input.externalId, bare, `true_${input.recipient}_${bare}`])];
+    return wahaEchoExternalIds(input.externalId, input.recipient);
   },
 
   // Mesmo pre-check que o handler já fazia com `getWahaClient() !== null`,
@@ -100,6 +125,48 @@ export const wahaAdapter: ChannelAdapter = {
     const client = getWahaClient();
     if (!client) return null;
     return client.resolvePhoneForLid(input.sessionRef, input.identity.slice("lid:".length));
+  },
+
+  /**
+   * `check-exists` nas duas grafias do nono dígito; só JID de telefone serve
+   * (ver `phoneJidDigitsFromCheckResult`). Transporte não configurado é `null`.
+   */
+  async resolveRegisteredPhone(input: { sessionRef: string; phone: string }): Promise<string | null> {
+    const client = getWahaClient();
+    if (!client) return null;
+    return resolvePhoneJidDigitsForCall(client, input.sessionRef, input.phone);
+  },
+
+  /**
+   * "digitando…" no aparelho do cliente, antes da 1ª bolha do turno da IA.
+   *
+   * Transporte não configurado é NOOP, não erro — mesmo critério do `send`
+   * logo abaixo: numa instalação sem o container de pé o produto não pode
+   * parar por causa de um indicador decorativo.
+   */
+  async signalTyping(input: { sessionRef: string; recipient: string }): Promise<void> {
+    const client = getWahaClient();
+    if (!client) return;
+    await client.setPresence(input.sessionRef, input.recipient, "typing");
+  },
+
+  async editMessage(input: {
+    sessionRef: string;
+    recipient: string | null;
+    externalId: string;
+    text: string;
+  }): Promise<void> {
+    const { client, chatId, messageId } = enderecoDaMensagem(input);
+    await client.editMessage(input.sessionRef, chatId, messageId, input.text);
+  },
+
+  async revokeMessage(input: {
+    sessionRef: string;
+    recipient: string | null;
+    externalId: string;
+  }): Promise<void> {
+    const { client, chatId, messageId } = enderecoDaMensagem(input);
+    await client.deleteMessage(input.sessionRef, chatId, messageId);
   },
 
   /**
@@ -149,6 +216,18 @@ export const wahaAdapter: ChannelAdapter = {
     }
   },
 
+  async listGroups(input: { sessionRef: string }) {
+    const client = getWahaClient();
+    if (!client) throw new Error("waha_not_configured");
+    return client.listarGrupos(input.sessionRef);
+  },
+
+  async setGroupIntake(input: { sessionRef: string; receive: boolean }) {
+    const client = getWahaClient();
+    if (!client) return false;
+    return client.definirRecebimentoDeGrupos(input.sessionRef, input.receive);
+  },
+
   /**
    * Baixa o anexo que o cliente mandou.
    *
@@ -175,6 +254,8 @@ export const wahaAdapter: ChannelAdapter = {
     // comportamento visível — proibido nas Fases 0–2.
     if (!client) return { externalId: null };
 
+    const to = await resolveCanonicalCusChatId(client, envelope.sessionRef, envelope.to);
+
     // A estrutura de três caminhos é do upstream (o cartão de contato entrou
     // depois da citação). O que se enxerta aqui é o `replyToExternalId` no
     // caminho de TEXTO — os outros dois não citam: o WAHA aceita `reply_to` só
@@ -192,21 +273,24 @@ export const wahaAdapter: ChannelAdapter = {
         envelope.contact.phoneNumber,
         resolvedId ?? envelope.contact.whatsappId,
       );
-      res = await client.sendContactVcard(envelope.sessionRef, envelope.to, [contact]);
+      await envelope.beforeSend?.();
+      res = await client.sendContactVcard(envelope.sessionRef, to, [contact]);
     } else if (envelope.media) {
+      await envelope.beforeSend?.();
       res = await client.sendMedia(
         envelope.sessionRef,
-        envelope.to,
+        to,
         wahaSendPlanFor(envelope.kind, envelope.media),
       );
     } else {
+      await envelope.beforeSend?.();
       res = await client.sendMessage(
         envelope.sessionRef,
-        envelope.to,
+        to,
         envelope.body ?? "",
         // A citação é enfeite da conversa, nunca condição de envio: quando não
         // há, o envio segue igual. Ver `OutboundEnvelope.replyToExternalId`.
-        envelope.replyToExternalId,
+        envelope.replyToExternalId ? idCompletoDaMensagem(envelope.replyToExternalId, to) : null,
       );
     }
 

@@ -1,5 +1,9 @@
 "use client";
 
+import { useT } from "@/hooks/i18n/useT";
+
+import { useQuery } from "@tanstack/react-query";
+import { apiClient } from "@/lib/api/client";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -17,16 +21,26 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useUpdateTriggerConfig } from "@/hooks/followup/useFollowupFlow";
-import { useEtapasDeGatilho } from "@/hooks/followup/useEtapasDeGatilho";
+import { etapasPorFunil, nomeDaEtapa, useEtapasDeGatilho } from "@/hooks/followup/useEtapasDeGatilho";
+import {
+  DEFAULT_THRESHOLD_MINUTES as DEFAULT_RETORNO_MINUTES,
+  UNIDADES_DE_LIMIAR,
+  limiarDaTela,
+  limiarValido,
+  minutosDoLimiar,
+  type UnidadeDeLimiar,
+} from "@/lib/followup/gap-de-retorno";
+import { MAX_PAUSA_DE_REENTRADA_MINUTES } from "@/lib/followup/pausa-de-reentrada";
 
 /**
  * Controle de `trigger_config` do pointer (Task 8.5) — como o fluxo começa.
  *
  * ⚠️ SÓ APARECE AQUI O QUE TEM MOTOR VIVO, e essa disciplina é a razão de o
- * controle ser confiável: `manual` (POST manual), `silence` (silence-sweep) e
- * `stage_change` (`lib/followup/gatilho-etapa.ts`, consumidor de
- * `lead.stage_changed` no `event_log`). `conversation_end` continua no schema
- * sem produtor — não é oferecido, e o publish o recusa se chegar por API crua.
+ * controle ser confiável: `manual` (POST manual), `silence` (silence-sweep),
+ * `stage_change` (`lib/followup/gatilho-etapa.ts`), `inbound_after_silence`
+ * (`lib/followup/gatilho-retorno.ts`) e os demais kinds com produtor.
+ * `conversation_end` continua no schema sem produtor — não é oferecido, e o
+ * publish o recusa se chegar por API crua.
  * Dado antigo com um kind que não sabemos armar é mostrado como
  * «(indisponível)» em vez de mentir «Manual».
  *
@@ -50,24 +64,54 @@ import { useEtapasDeGatilho } from "@/hooks/followup/useEtapasDeGatilho";
  * «poucos minutos», não «na hora» — prometer instantâneo seria o controle
  * mentindo sobre a própria função.
  */
-type TriggerKind = "manual" | "silence" | "stage_change" | "case_opened";
+type TriggerKind =
+  | "appointment_no_show"
+  | "manual"
+  | "silence"
+  | "stage_change"
+  | "case_opened"
+  | "webhook"
+  | "inbound_after_silence"
+  | "lead_created";
 
 interface TriggerFormState {
   kind: TriggerKind;
   thresholdMinutes: number;
+  thresholdValor: number;
+  thresholdUnidade: UnidadeDeLimiar;
   segments: string;
+  /** Pausa de reentrada do gatilho de silêncio, em HORAS na tela; o fio guarda minutos. */
+  reentryPauseHours: number;
+  /** Teto do silêncio, em minutos; 0 = sem teto. */
+  maxSilenceMinutes: number;
+  /** A pausa conta do último ENVIO deste fluxo (e não da última mensagem do cliente). */
+  pauseFromLastSend: boolean;
   stageId: string;
   cancelOnReply: boolean;
+  eventTypeIds: string[];
 }
 
 const DEFAULT_THRESHOLD_MINUTES = 60;
 const MIN_THRESHOLD_MINUTES = 5;
+const MAX_PAUSA_HORAS = MAX_PAUSA_DE_REENTRADA_MINUTES / 60;
+/** O mesmo teto do mínimo no contrato (7 dias). */
+const MAX_SILENCIO_MINUTOS = 10_080;
 
 const KIND_LABEL: Record<TriggerKind, string> = {
+  appointment_no_show:"Falta confirmada pela equipe",
   manual: "Manual",
   silence: "Silêncio",
   stage_change: "Etapa do funil",
+  // "Agente pediu ajuda", e não "Pedido de ajuda": numa lista ao lado de
+  // "Manual", "Silêncio" e "Etapa do funil", o rótulo sem sujeito não diz
+  // QUEM pediu. O resumo do botão (`resumoDoGatilho`) e o vocabulário
+  // (`lib/followup/vocabulario.ts`) já falam de "o agente pede ajuda" —
+  // esta era a única das três grafias sem sujeito, e as duas specs que
+  // cercam o gatilho procuram por ela com `exact: true`.
   case_opened: "Agente pediu ajuda",
+  webhook: "Automação (Webhooks)",
+  inbound_after_silence: "Cliente voltou",
+  lead_created: "Lead criado",
 };
 
 function parseTriggerConfig(raw: Record<string, unknown>): TriggerFormState {
@@ -78,22 +122,54 @@ function parseTriggerConfig(raw: Record<string, unknown>): TriggerFormState {
   // botão de cancelar-na-resposta. Agora só os kinds que este painel sabe EDITAR
   // caem no formulário; o resto é preservado (ver `open` no componente).
   const kind: TriggerKind =
-    raw.kind === "silence"
-      ? "silence"
-      : raw.kind === "stage_change"
-        ? "stage_change"
-        : raw.kind === "case_opened"
-          ? "case_opened"
-          : "manual";
+    raw.kind === "appointment_no_show"
+      ? "appointment_no_show"
+      : raw.kind === "silence"
+        ? "silence"
+        : raw.kind === "inbound_after_silence"
+          ? "inbound_after_silence"
+          : raw.kind === "stage_change"
+            ? "stage_change"
+            : raw.kind === "case_opened"
+              ? "case_opened"
+              : raw.kind === "webhook"
+                ? "webhook"
+                : raw.kind === "lead_created"
+                  ? "lead_created"
+                  : "manual";
   const params =
-    (raw.params as { threshold_minutes?: number; segments?: string[]; stage_id?: string } | undefined) ?? {};
+    (raw.params as {
+      threshold_minutes?: number;
+      segments?: string[];
+      stage_id?: string;
+      event_type_ids?: string[];
+      reentry_pause_minutes?: number;
+      max_silence_minutes?: number;
+      reentry_pause_basis?: string;
+    } | undefined) ?? {};
+  const minutosRetorno =
+    kind === "inbound_after_silence" && typeof params.threshold_minutes === "number"
+      ? params.threshold_minutes
+      : DEFAULT_RETORNO_MINUTES;
+  const tela = limiarDaTela(minutosRetorno);
   return {
     kind,
+    eventTypeIds: Array.isArray(params.event_type_ids) ? params.event_type_ids : [],
     thresholdMinutes:
       kind === "silence" && typeof params.threshold_minutes === "number"
         ? params.threshold_minutes
         : DEFAULT_THRESHOLD_MINUTES,
-    segments: kind === "silence" && Array.isArray(params.segments) ? params.segments.join(", ") : "",
+    thresholdValor: tela.valor,
+    thresholdUnidade: tela.unidade,
+    segments:
+      (kind === "silence" || kind === "inbound_after_silence") && Array.isArray(params.segments)
+        ? params.segments.join(", ")
+        : "",
+    reentryPauseHours:
+      kind === "silence" && typeof params.reentry_pause_minutes === "number" ? params.reentry_pause_minutes / 60 : 0,
+    maxSilenceMinutes:
+      kind === "silence" && typeof params.max_silence_minutes === "number" ? params.max_silence_minutes : 0,
+    pauseFromLastSend: kind === "silence" && params.reentry_pause_basis === "ultimo_envio",
     stageId: kind === "stage_change" && typeof params.stage_id === "string" ? params.stage_id : "",
     cancelOnReply: raw.cancel_on_reply === true,
   };
@@ -101,6 +177,7 @@ function parseTriggerConfig(raw: Record<string, unknown>): TriggerFormState {
 
 function toTriggerConfig(form: TriggerFormState): Record<string, unknown> {
   const cancelOnReply = form.cancelOnReply ? { cancel_on_reply: true } : {};
+  if (form.kind === "appointment_no_show") return {kind:"appointment_no_show",params:{event_type_ids:form.eventTypeIds}};
   if (form.kind === "manual") return { kind: "manual", ...cancelOnReply };
 
   if (form.kind === "stage_change") {
@@ -110,14 +187,36 @@ function toTriggerConfig(form: TriggerFormState): Record<string, unknown> {
   // Sem `params`: não há o que casar. Todo caso aberto da organização dispara
   // todo fluxo armado assim.
   if (form.kind === "case_opened") return { kind: "case_opened", ...cancelOnReply };
+  if (form.kind === "webhook") return { kind: "webhook", ...cancelOnReply };
+  if (form.kind === "lead_created") return { kind: "lead_created", ...cancelOnReply };
 
   const segments = form.segments
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+
+  if (form.kind === "inbound_after_silence") {
+    const minutes = minutosDoLimiar(form.thresholdValor, form.thresholdUnidade);
+    return {
+      kind: "inbound_after_silence",
+      params: {
+        threshold_minutes: Number.isFinite(minutes) ? minutes : DEFAULT_RETORNO_MINUTES,
+        ...(segments.length > 0 ? { segments } : {}),
+      },
+      ...cancelOnReply,
+    };
+  }
+
+  const pausa = Math.round(form.reentryPauseHours * 60);
   return {
     kind: "silence",
-    params: { threshold_minutes: form.thresholdMinutes, ...(segments.length > 0 ? { segments } : {}) },
+    params: {
+      threshold_minutes: form.thresholdMinutes,
+      ...(segments.length > 0 ? { segments } : {}),
+      ...(pausa > 0 ? { reentry_pause_minutes: pausa } : {}),
+      ...(pausa > 0 && form.pauseFromLastSend ? { reentry_pause_basis: "ultimo_envio" } : {}),
+      ...(form.maxSilenceMinutes > 0 ? { max_silence_minutes: Math.round(form.maxSilenceMinutes) } : {}),
+    },
     ...cancelOnReply,
   };
 }
@@ -125,23 +224,59 @@ function toTriggerConfig(form: TriggerFormState): Record<string, unknown> {
 function summaryLabel(
   cfg: Record<string, unknown>,
   etapa: { stageName: string; pipelineName: string } | null,
+  t: (texto: string) => string = (texto) => texto,
 ): string {
+  if(cfg.kind === "appointment_no_show") return t("Gatilho: falta confirmada pela equipe");
   if (cfg.kind === "silence") {
+    const params = cfg.params as
+      | { threshold_minutes?: number; reentry_pause_minutes?: number; max_silence_minutes?: number; reentry_pause_basis?: string }
+      | undefined;
+    const minutes = params?.threshold_minutes;
+    const pausa = params?.reentry_pause_minutes;
+    const teto = params?.max_silence_minutes;
+    const detalhe = [
+      typeof minutes === "number" ? (typeof teto === "number" && teto > 0 ? `${minutes}–${teto} min` : `${minutes} min`) : null,
+      typeof pausa === "number" && pausa > 0
+        ? params?.reentry_pause_basis === "ultimo_envio"
+          ? `${t("no máximo 1× a cada")} ${Math.round((pausa / 60) * 10) / 10} h`
+          : `${t("pausa de")} ${Math.round((pausa / 60) * 10) / 10} h`
+        : null,
+    ].filter(Boolean);
+    return `${t("Gatilho")}: ${t("Silêncio")}${detalhe.length > 0 ? ` (${detalhe.join(" · ")})` : ""}`;
+  }
+  if (cfg.kind === "inbound_after_silence") {
     const minutes = (cfg.params as { threshold_minutes?: number } | undefined)?.threshold_minutes;
-    return `Gatilho: Silêncio${typeof minutes === "number" ? ` (${minutes} min)` : ""}`;
+    const tela = limiarDaTela(typeof minutes === "number" ? minutes : DEFAULT_RETORNO_MINUTES);
+    const unidade =
+      tela.unidade === "days"
+        ? tela.valor === 1
+          ? t("dia")
+          : t("dias")
+        : tela.unidade === "hours"
+          ? tela.valor === 1
+            ? t("hora")
+            : t("horas")
+          : tela.valor === 1
+            ? t("minuto")
+            : t("minutos");
+    return `${t("Gatilho")}: ${t("Cliente voltou")} (${tela.valor} ${unidade})`;
   }
   if (cfg.kind === "stage_change") {
     // Enquanto os nomes não chegaram (ou a etapa sumiu do funil) o rótulo diz o
     // TIPO em vez de vazar o uuid — que é justamente o que esta tela não faz.
     // Com o funil junto, este rótulo passa a distinguir as homônimas: é a única
     // superfície que o dono lê uma semana depois, sem abrir nada.
-    return etapa ? `Gatilho: entrou em «${etapa.stageName}» em ${etapa.pipelineName}` : "Gatilho: Etapa do funil";
+    return etapa
+      ? `${t("Gatilho")}: ${t("entrou em")} «${etapa.stageName}» ${t("em")} ${etapa.pipelineName}`
+      : `${t("Gatilho")}: ${t("Etapa do funil")}`;
   }
-  if (cfg.kind === "case_opened") return "Gatilho: quando o agente pede ajuda";
-  if (cfg.kind === "manual" || cfg.kind === undefined) return "Gatilho: Manual";
+  if (cfg.kind === "case_opened") return `${t("Gatilho")}: ${t("quando o agente pede ajuda")}`;
+  if (cfg.kind === "webhook") return t("Disparado por uma automação em Webhooks");
+  if (cfg.kind === "lead_created") return `${t("Gatilho")}: ${t("Lead criado")}`;
+  if (cfg.kind === "manual" || cfg.kind === undefined) return `${t("Gatilho")}: ${t("Manual")}`;
   // conversation_end de dados antigos (API crua) — sem UI própria, mas mostrado
   // com transparência em vez de mentir "Manual".
-  return `Gatilho: ${String(cfg.kind)} (indisponível)`;
+  return `${t("Gatilho")}: ${String(cfg.kind)} (${t("indisponível")})`;
 }
 
 interface Props {
@@ -150,11 +285,13 @@ interface Props {
 }
 
 export function TriggerConfigControl({ flowId, triggerConfig }: Props) {
+  const t = useT();
   const update = useUpdateTriggerConfig(flowId);
   const [open, setOpen] = useState(false);
   const [saved, setSaved] = useState<TriggerFormState>(() => parseTriggerConfig(triggerConfig));
   const [form, setForm] = useState<TriggerFormState>(saved);
-
+  const eventTypes=useQuery({queryKey:["agenda","tipos"],enabled:open&&form.kind==="appointment_no_show",queryFn:async()=>
+    (await apiClient.get<{data:Array<{id:string;name:string}>}>("/api/v1/agenda/tipos")).data});
   // A leitura das etapas acompanha o botão, não o popover: o rótulo fechado
   // precisa do nome da etapa para não exibir «Etapa do funil» genérico num
   // fluxo já configurado.
@@ -170,15 +307,41 @@ export function TriggerConfigControl({ flowId, triggerConfig }: Props) {
     setForm(next);
   }, [triggerConfig, open]);
 
+  const minutosRetorno = minutosDoLimiar(form.thresholdValor, form.thresholdUnidade);
+  const retornoInvalid =
+    form.kind === "inbound_after_silence" && !limiarValido(minutosRetorno);
+  const pausaInvalid =
+    form.kind === "silence" &&
+    (!Number.isFinite(form.reentryPauseHours) || form.reentryPauseHours < 0 || form.reentryPauseHours > MAX_PAUSA_HORAS);
+  const tetoInvalid =
+    form.kind === "silence" &&
+    form.maxSilenceMinutes !== 0 &&
+    (!Number.isFinite(form.maxSilenceMinutes) ||
+      form.maxSilenceMinutes <= form.thresholdMinutes ||
+      form.maxSilenceMinutes > MAX_SILENCIO_MINUTOS);
   const thresholdInvalid =
-    form.kind === "silence" && (!Number.isFinite(form.thresholdMinutes) || form.thresholdMinutes < MIN_THRESHOLD_MINUTES);
+    (form.kind === "silence" &&
+      (!Number.isFinite(form.thresholdMinutes) || form.thresholdMinutes < MIN_THRESHOLD_MINUTES)) ||
+    retornoInvalid ||
+    pausaInvalid ||
+    tetoInvalid;
   // Gatilho de etapa sem etapa escolhida não é rascunho: é um fluxo que ficaria
   // ativo sem nunca disparar. O publish recusa; o Salvar recusa antes.
   const stageInvalid = form.kind === "stage_change" && form.stageId.trim().length === 0;
   const dirty =
     form.kind !== saved.kind ||
+    (form.kind === "appointment_no_show" && form.eventTypeIds.join() !== saved.eventTypeIds.join()) ||
     form.cancelOnReply !== saved.cancelOnReply ||
-    (form.kind === "silence" && (form.thresholdMinutes !== saved.thresholdMinutes || form.segments !== saved.segments)) ||
+    (form.kind === "silence" &&
+      (form.thresholdMinutes !== saved.thresholdMinutes ||
+        form.segments !== saved.segments ||
+        form.reentryPauseHours !== saved.reentryPauseHours ||
+        form.maxSilenceMinutes !== saved.maxSilenceMinutes ||
+        form.pauseFromLastSend !== saved.pauseFromLastSend)) ||
+    (form.kind === "inbound_after_silence" &&
+      (form.thresholdValor !== saved.thresholdValor ||
+        form.thresholdUnidade !== saved.thresholdUnidade ||
+        form.segments !== saved.segments)) ||
     (form.kind === "stage_change" && form.stageId !== saved.stageId);
 
   const onSave = () => {
@@ -191,46 +354,60 @@ export function TriggerConfigControl({ flowId, triggerConfig }: Props) {
     });
   };
 
-  // Agrupa por funil preservando a ordem em que as etapas chegaram (ordem do
-  // funil) — duas etapas homônimas em funis diferentes precisam do cabeçalho
+  // Duas etapas homônimas em funis diferentes precisam do cabeçalho do grupo
   // para serem distinguíveis.
-  const funis: Array<{ id: string; nome: string; etapas: typeof etapas }> = [];
-  for (const etapa of etapas) {
-    let grupo = funis.find((f) => f.id === etapa.pipelineId);
-    if (!grupo) {
-      grupo = { id: etapa.pipelineId, nome: etapa.pipelineName, etapas: [] };
-      funis.push(grupo);
-    }
-    grupo.etapas.push(etapa);
-  }
+  const funis = etapasPorFunil(etapas);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button type="button" variant="outline" size="sm" data-testid="trigger-config-button">
-          {summaryLabel(triggerConfig, etapaSalva ?? null)}
+          {summaryLabel(triggerConfig, etapaSalva ?? null, t)}
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-80" align="end" data-testid="trigger-config-panel">
+      {/* O painel cresce com o gatilho de silêncio (mínimo, teto, segmentos, pausa):
+          numa tela de 720 px o «Salvar gatilho» ficava abaixo da dobra, sem rolagem.
+          Mesma régua do `SelectContent` (altura disponível do Radix + rolagem). */}
+      <PopoverContent
+        className="w-80 max-h-(--radix-popover-content-available-height) overflow-y-auto"
+        align="end"
+        data-testid="trigger-config-panel"
+      >
         <div className="space-y-3">
           <div className="space-y-2">
-            <Label htmlFor="trigger-kind">Tipo de gatilho</Label>
-            <Select value={form.kind} onValueChange={(v) => setForm((f) => ({ ...f, kind: v as TriggerKind }))}>
+            <Label htmlFor="trigger-kind">{t("Tipo de gatilho")}</Label>
+            <Select
+              value={form.kind}
+              onValueChange={(v) =>
+                setForm((f) => {
+                  const kind = v as TriggerKind;
+                  if (kind === "inbound_after_silence" && f.kind !== "inbound_after_silence") {
+                    const tela = limiarDaTela(DEFAULT_RETORNO_MINUTES);
+                    return { ...f, kind, thresholdValor: tela.valor, thresholdUnidade: tela.unidade };
+                  }
+                  return { ...f, kind };
+                })
+              }
+            >
               <SelectTrigger id="trigger-kind">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="manual">{KIND_LABEL.manual}</SelectItem>
-                <SelectItem value="silence">{KIND_LABEL.silence}</SelectItem>
-                <SelectItem value="stage_change">{KIND_LABEL.stage_change}</SelectItem>
-                <SelectItem value="case_opened">{KIND_LABEL.case_opened}</SelectItem>
+                <SelectItem value="manual">{t(KIND_LABEL.manual)}</SelectItem>
+                <SelectItem value="silence">{t(KIND_LABEL.silence)}</SelectItem>
+                <SelectItem value="stage_change">{t(KIND_LABEL.stage_change)}</SelectItem>
+                <SelectItem value="appointment_no_show">{t(KIND_LABEL.appointment_no_show)}</SelectItem>
+                <SelectItem value="case_opened">{t(KIND_LABEL.case_opened)}</SelectItem>
+                <SelectItem value="inbound_after_silence">{t(KIND_LABEL.inbound_after_silence)}</SelectItem>
+                <SelectItem value="lead_created">{t(KIND_LABEL.lead_created)}</SelectItem>
+                <SelectItem value="webhook">{t(KIND_LABEL.webhook)}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           {form.kind === "stage_change" && (
             <div className="space-y-2">
-              <Label htmlFor="trigger-stage">Etapa que dispara o fluxo</Label>
+              <Label htmlFor="trigger-stage">{t("Etapa que dispara o fluxo")}</Label>
               <Select
                 value={form.stageId}
                 onValueChange={(v) => setForm((f) => ({ ...f, stageId: v }))}
@@ -250,7 +427,7 @@ export function TriggerConfigControl({ flowId, triggerConfig }: Props) {
                         // isto, escolher entre duas «Em andamento» é adivinhação
                         // — e escolher errado falha calado no motor.
                         <SelectItem key={etapa.stageId} value={etapa.stageId}>
-                          {etapa.stageName} · {etapa.pipelineName}
+                          {nomeDaEtapa(etapa)}
                         </SelectItem>
                       ))}
                     </SelectGroup>
@@ -259,42 +436,119 @@ export function TriggerConfigControl({ flowId, triggerConfig }: Props) {
               </Select>
               {!etapasCarregando && etapas.length === 0 && (
                 <p className="text-xs text-error-fg">
-                  Nenhuma etapa ativa encontrada — crie o funil antes de armar este gatilho.
+                  {t("Nenhuma etapa ativa encontrada — crie o funil antes de armar este gatilho.")}
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
-                O fluxo começa quando um negócio entra nesta etapa, por arrasto no quadro ou por
-                automação. A entrada na fila leva poucos minutos, não é instantânea.
+                {t("O fluxo começa quando um negócio entra nesta etapa, por arrasto no quadro ou por automação. A entrada na fila leva poucos minutos, não é instantânea.")}
               </p>
             </div>
           )}
 
+          {form.kind === "appointment_no_show" && <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">{t("Só começa após falta confirmada pela equipe. Remarcação, cancelamento ou nova resposta interrompem a recuperação. Outro acompanhamento ativo impede o início.")}</p>
+            <p className="text-xs">{t("Tipos de compromisso (nenhum selecionado = todos)")}</p>
+            {eventTypes.data?.map(type=><label key={type.id} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.eventTypeIds.includes(type.id)} onChange={e=>setForm(f=>({...f,eventTypeIds:e.target.checked?[...f.eventTypeIds,type.id]:f.eventTypeIds.filter(id=>id!==type.id)}))}/>{type.name}</label>)}
+            {eventTypes.isError?<p role="alert">{t("Não foi possível carregar os tipos de compromisso.")}</p>:null}
+          </div>}
           {form.kind === "case_opened" && (
             <div className="space-y-2">
               <p className="text-xs text-muted-foreground">
-                O fluxo começa quando o agente abre um caso — o momento em que ele diz que
-                precisa de uma pessoa. Não há o que escolher aqui: vale para qualquer caso
-                desta conta.
+                {t("O fluxo começa quando o agente abre um caso — o momento em que ele diz que precisa de uma pessoa. Não há o que escolher aqui: vale para qualquer caso desta conta.")}
               </p>
               {/* ⚠️ ESTA FRASE NÃO É DICA, É A DEFESA PRINCIPAL. Abrir um caso não
                   cala o agente: ele continua conversando. Um fluxo que fale no mesmo
                   instante põe duas vozes na mesma conversa. O atraso é do FLUXO, e
                   quem monta precisa saber disso antes de publicar. */}
               <p className="text-xs text-muted-foreground">
-                <strong className="font-medium">Comece o fluxo por uma espera.</strong> O agente
-                continua conversando depois de abrir o caso — sem espera, o cliente recebe duas
-                mensagens ao mesmo tempo.
+                <strong className="font-medium">{t("Comece o fluxo por uma espera.")}</strong> {t("O agente continua conversando depois de abrir o caso — sem espera, o cliente recebe duas mensagens ao mesmo tempo.")}
               </p>
               <p className="text-xs text-muted-foreground">
-                Se o caso for resolvido antes, o follow-up é cancelado sozinho.
+                {t("Se o caso for resolvido antes, o follow-up é cancelado sozinho.")}
               </p>
             </div>
+          )}
+
+          {form.kind === "lead_created" && (
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  "O fluxo começa quando um negócio nasce: a primeira mensagem que abre o card, um formulário ou o cadastro manual. Negócios importados por planilha não entram. A entrada na fila leva poucos minutos, não é instantânea.",
+                )}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                <strong className="font-medium">{t("Comece o fluxo por uma espera.")}</strong>{" "}
+                {t(
+                  "Quem escreveu pode receber a resposta do agente no mesmo instante — sem espera, saem duas mensagens juntas.",
+                )}
+              </p>
+            </div>
+          )}
+
+          {form.kind === "webhook" && (
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "O fluxo começa quando uma regra em Webhooks usa a ação «Iniciar fluxo de mensagem» apontando para este fluxo publicado.",
+              )}
+            </p>
+          )}
+
+          {form.kind === "inbound_after_silence" && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="trigger-retorno-valor">{t("Tempo sem o cliente falar")}</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="trigger-retorno-valor"
+                    type="number"
+                    min={1}
+                    value={form.thresholdValor}
+                    onChange={(e) => setForm((f) => ({ ...f, thresholdValor: Number(e.target.value) }))}
+                    aria-invalid={retornoInvalid}
+                  />
+                  <Select
+                    value={form.thresholdUnidade}
+                    onValueChange={(v) => setForm((f) => ({ ...f, thresholdUnidade: v as UnidadeDeLimiar }))}
+                  >
+                    <SelectTrigger id="trigger-retorno-unidade" className="w-32">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {UNIDADES_DE_LIMIAR.map((u) => (
+                        <SelectItem key={u} value={u}>
+                          {t(u === "minutes" ? "minutos" : u === "hours" ? "horas" : "dias")}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {retornoInvalid && (
+                  <p className="text-xs text-error-fg">
+                    {t("Mínimo de")} 1 {t("hora")}. {t("Máximo de")} 90 {t("dias")}.
+                  </p>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  "O fluxo começa quando o cliente escreve depois de ficar este tempo sem mandar mensagem. Não é o mesmo que silêncio: silêncio avisa enquanto ele some; este avisa quando ele volta.",
+                )}
+              </p>
+              <div className="space-y-2">
+                <Label htmlFor="trigger-retorno-segments">{t("Segmentos (tags, opcional)")}</Label>
+                <Input
+                  id="trigger-retorno-segments"
+                  placeholder={t("ex: vip, carrinho-abandonado")}
+                  value={form.segments}
+                  onChange={(e) => setForm((f) => ({ ...f, segments: e.target.value }))}
+                />
+              </div>
+            </>
           )}
 
           {form.kind === "silence" && (
             <>
               <div className="space-y-2">
-                <Label htmlFor="trigger-threshold">Minutos de silêncio</Label>
+                <Label htmlFor="trigger-threshold">{t("Minutos de silêncio")}</Label>
                 <Input
                   id="trigger-threshold"
                   type="number"
@@ -303,27 +557,83 @@ export function TriggerConfigControl({ flowId, triggerConfig }: Props) {
                   onChange={(e) => setForm((f) => ({ ...f, thresholdMinutes: Number(e.target.value) }))}
                   aria-invalid={thresholdInvalid}
                 />
-                {thresholdInvalid && (
-                  <p className="text-xs text-error-fg">Mínimo de {MIN_THRESHOLD_MINUTES} minutos.</p>
+                {thresholdInvalid && !tetoInvalid && !pausaInvalid && (
+                  <p className="text-xs text-error-fg">{t("Mínimo de")} {MIN_THRESHOLD_MINUTES} {t("minutos.")}</p>
                 )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="trigger-max-silence">{t("Silêncio máximo, em minutos (opcional)")}</Label>
+                <Input
+                  id="trigger-max-silence"
+                  type="number"
+                  min={0}
+                  max={MAX_SILENCIO_MINUTOS}
+                  value={form.maxSilenceMinutes}
+                  onChange={(e) => setForm((f) => ({ ...f, maxSilenceMinutes: Number(e.target.value) }))}
+                  aria-invalid={tetoInvalid}
+                  data-testid="trigger-max-silence"
+                />
+                {tetoInvalid && (
+                  <p className="text-xs text-error-fg">{t("Precisa ser maior que o mínimo e no máximo 10080 (7 dias).")}</p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    "Com um máximo, o fluxo só começa enquanto o silêncio for recente — por exemplo, entre 10 e 60 minutos depois da última mensagem do cliente. Quem está calado há mais tempo fica de fora. 0 = sem máximo.",
+                  )}
+                </p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="trigger-segments">Segmentos (tags, opcional)</Label>
                 <Input
                   id="trigger-segments"
-                  placeholder="ex: vip, carrinho-abandonado"
+                  placeholder={t("ex: vip, carrinho-abandonado")}
                   value={form.segments}
                   onChange={(e) => setForm((f) => ({ ...f, segments: e.target.value }))}
                 />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="trigger-reentry-pause">{t("Pausa antes de recomeçar (horas)")}</Label>
+                <Input
+                  id="trigger-reentry-pause"
+                  type="number"
+                  min={0}
+                  max={MAX_PAUSA_HORAS}
+                  value={form.reentryPauseHours}
+                  onChange={(e) => setForm((f) => ({ ...f, reentryPauseHours: Number(e.target.value) }))}
+                  aria-invalid={pausaInvalid}
+                  data-testid="trigger-reentry-pause"
+                />
+                {pausaInvalid && (
+                  <p className="text-xs text-error-fg">{t("Use de 0 a 2160 horas (90 dias).")}</p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    "Vale para quem já passou por este fluxo e respondeu ou chegou ao fim: ele só recomeça depois deste tempo sem o cliente escrever. Quem nunca passou por ele entra no tempo de silêncio de sempre. 0 = sem pausa.",
+                  )}
+                </p>
+                {form.reentryPauseHours > 0 && (
+                  <div className="flex items-start justify-between gap-2">
+                    <Label htmlFor="trigger-pause-basis" className="text-xs font-normal leading-snug">
+                      {t("Contar a pausa a partir do último envio deste fluxo (e não da última mensagem do cliente)")}
+                    </Label>
+                    <Switch
+                      id="trigger-pause-basis"
+                      checked={form.pauseFromLastSend}
+                      onCheckedChange={(checked) => setForm((f) => ({ ...f, pauseFromLastSend: checked }))}
+                      data-testid="trigger-pause-basis"
+                    />
+                  </div>
+                )}
               </div>
             </>
           )}
 
           <div className="flex items-center justify-between gap-2">
-            <Label htmlFor="trigger-cancel-on-reply">Cancelar se o lead responder</Label>
+            <Label htmlFor="trigger-cancel-on-reply">{t("Cancelar se o lead responder")}</Label>
             <Switch
               id="trigger-cancel-on-reply"
-              checked={form.cancelOnReply}
+              checked={form.kind === "appointment_no_show" || form.cancelOnReply}
+              disabled={form.kind === "appointment_no_show"}
               onCheckedChange={(checked) => setForm((f) => ({ ...f, cancelOnReply: checked }))}
             />
           </div>
@@ -336,7 +646,7 @@ export function TriggerConfigControl({ flowId, triggerConfig }: Props) {
             onClick={onSave}
             data-testid="trigger-config-save"
           >
-            {update.isPending ? "Salvando…" : "Salvar gatilho"}
+            {update.isPending ? t("Salvando…") : t("Salvar gatilho")}
           </Button>
         </div>
       </PopoverContent>

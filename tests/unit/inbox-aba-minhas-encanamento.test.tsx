@@ -21,6 +21,7 @@ const getSpy = vi.fn(async (_url: string) => ({ data: [], meta: { has_more: fals
 vi.mock("@/lib/api/client", () => ({ apiClient: { get: (url: string) => getSpy(url) } }));
 vi.mock("@/components/feedback/ApiErrorToast", () => ({ showApiError: vi.fn() }));
 vi.mock("@/lib/supabase/browser", () => ({
+  prepareRealtimeAuthentication: vi.fn().mockResolvedValue(undefined),
   createClient: () => ({
     channel: () => ({ on: () => ({ subscribe: () => ({}) }), subscribe: () => ({}) }),
     removeChannel: () => {},
@@ -78,7 +79,7 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/auth/server", () => ({
   mfaEmDivida: vi.fn(async () => false),
   loadAuthUser: async () => ({ id: "user-1" }),
-  resolveActiveOrg: async () => ({ orgId: "org-1" }),
+  orgAtivaSemPortao: async () => ({ orgId: "org-1", org_status: "active" }),
 }));
 
 const { GET } = await import("@/app/api/v1/conversations/route");

@@ -6,15 +6,22 @@
  */
 import type pg from 'pg';
 
+import { extrairJsonDoTexto } from '@/lib/agent-engine/texto/extrair-json-do-texto';
+
 import { runModelCall, type LlmEdgeConfig } from '../edge/llm/run-model-call';
 import type { Logger } from '../obs/logger';
 import { aggregateFollowupOutcomes, type FlowOutcomeStat } from '../../followup/outcome-stats';
 
-const JUDGE_MODEL = 'claude-haiku-4-5';
-// O distiller PRECISA de modelo próprio: o flywheel roda org-wide sem turno/agent
-// para herdar, então sem isto ele cai no settings.llm.default_model — não setado
-// em self-host configurado pela tela — e a rodada falha "modelo LLM não definido".
-const DISTILLER_MODEL = 'claude-haiku-4-5';
+// Os dois pontos do flywheel NÃO fixam modelo aqui. Fixavam `claude-haiku-4-5`,
+// e um id de modelo só é válido no vocabulário do provedor que a instalação usa:
+// numa VPS com a org apontada para OpenRouter, esse id literal voltava 400
+// `claude-haiku-4-5 is not a valid model ID` e a rodada agendada morria a cada
+// disparo (medido em produção em 2026-09-05). Sem `model`, cada ponto resolve
+// pela cadeia normal — escolha do painel de provedores, senão o padrão da
+// organização —, que é a mesma que faz todos os outros pontos funcionarem na
+// instalação. Onde não houver nenhum dos dois, o erro passa a ser o acionável
+// "modelo LLM não definido — configure o ponto no painel de provedores", em vez
+// de um 400 do provedor.
 const DIMENSION = 'memory_hygiene';
 const DATASET = 'live';
 
@@ -110,10 +117,9 @@ function distillerPrompt(missingFacts: string[]): string {
 }
 
 function parseJson<T>(text: string): T {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start === -1 || end <= start) throw new Error('saída do modelo sem JSON');
-  return JSON.parse(text.slice(start, end + 1)) as T;
+  const valor = extrairJsonDoTexto(text);
+  if (valor === null) throw new Error('saída do modelo sem JSON');
+  return valor as T;
 }
 
 
@@ -152,7 +158,6 @@ export async function runFlywheelOnce(
         leadId: turn.contact_id,
         jobId: turn.job_id,
         purpose: 'flywheel_judge',
-        model: JUDGE_MODEL,
         messages: [{ role: 'user', content: judgePrompt(material, optionOrder) }],
       },
       { log },
@@ -163,7 +168,7 @@ export async function runFlywheelOnce(
     const { rowCount } = await pool.query(
       `insert into flywheel_judge_verdicts
          (organization_id, dataset, trace_id, dimension, verdict, option_order, judge_family, model, provenance, run_id)
-       values ($1,$2,$3,$4,$5,$6,'anthropic',$7,$8,$9)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        on conflict (dataset, trace_id, dimension) do nothing`,
       [
         turn.organization_id,
@@ -172,7 +177,8 @@ export async function runFlywheelOnce(
         DIMENSION,
         verdictValue,
         optionOrder,
-        JUDGE_MODEL,
+        judgedCall.provider,
+        judgedCall.model,
         JSON.stringify({ source: 'live_turn', job_id: turn.job_id, contact_id: turn.contact_id }),
         runId,
       ],
@@ -190,7 +196,6 @@ export async function runFlywheelOnce(
           leadId: turn.contact_id,
           jobId: turn.job_id,
           purpose: 'flywheel_distiller',
-          model: DISTILLER_MODEL,
           messages: [{ role: 'user', content: distillerPrompt(verdict.missing_facts ?? []) }],
         },
         { log },

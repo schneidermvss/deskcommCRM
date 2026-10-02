@@ -1,7 +1,11 @@
 "use client";
+
+import { useT } from "@/hooks/i18n/useT";
 import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
 
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
@@ -16,6 +20,10 @@ import { usePipelines, usePipelineStages } from "@/hooks/webhooks/useWebhookSour
 import { useAgentsList } from "@/hooks/ai/useAgents";
 import { channelLabel, useChannelSessions } from "@/hooks/channels/useChannelSessions";
 import { useAssignableMembers } from "@/hooks/inbox/useAssignableMembers";
+import { useDefaultPipeline } from "@/hooks/pipelines/useDefaultPipeline";
+import { camposDoFunil } from "@/lib/leads/campos-do-funil";
+import { apiClient } from "@/lib/api/client";
+import type { FollowupFlowPointerRow } from "@/hooks/followup/useFollowupFlows";
 
 export type ActionItem =
   | { type: "create_or_move_lead"; config: { pipeline_id: string; stage_id: string } }
@@ -26,7 +34,18 @@ export type ActionItem =
     }
   | { type: "add_tag"; config: { tags: string[] } }
   | { type: "assign_owner"; config: { user_id: string } }
-  | { type: "call_webhook"; config: { url: string; secret?: string; secret_enc?: string } };
+  | { type: "call_webhook"; config: { url: string; secret?: string; secret_enc?: string; include_owner?: boolean } }
+  | { type: "start_message_flow"; config: { flow_pointer_id: string } }
+  // #1540 — o lembrete interno: mesmos campos do schema da API e do nó de fluxo.
+  | {
+      type: "create_task";
+      config: {
+        titulo: string;
+        vence_em_dias: number;
+        atribuir_a: "dono_do_lead" | { usuario_id: string };
+        prioridade: string;
+      };
+    };
 
 export function defaultActionConfig(type: ActionItem["type"]): ActionItem {
   switch (type) {
@@ -42,6 +61,14 @@ export function defaultActionConfig(type: ActionItem["type"]): ActionItem {
       return { type, config: { user_id: "" } };
     case "call_webhook":
       return { type, config: { url: "" } };
+    case "start_message_flow":
+      return { type, config: { flow_pointer_id: "" } };
+    // #1540 — o lembrete interno: mesma forma que o schema da API exige.
+    case "create_task":
+      return {
+        type,
+        config: { titulo: "", vence_em_dias: 1, atribuir_a: "dono_do_lead", prioridade: "medium" },
+      };
   }
 }
 
@@ -54,6 +81,7 @@ function CreateOrMoveLeadForm({
   config,
   onChange,
 }: FormProps<{ pipeline_id: string; stage_id: string }>) {
+  const t = useT();
   const { data: pipelinesRes, isLoading: pipelinesLoading } = usePipelines();
   const { data: boardRes, isLoading: stagesLoading } = usePipelineStages(
     config.pipeline_id || null,
@@ -64,14 +92,14 @@ function CreateOrMoveLeadForm({
   return (
     <div className="grid gap-2 sm:grid-cols-2">
       <div className="space-y-1">
-        <Label>Funil</Label>
+        <Label>{t("Funil")}</Label>
         <Select
           value={config.pipeline_id}
           onValueChange={(v) => onChange({ pipeline_id: v, stage_id: "" })}
           disabled={pipelinesLoading}
         >
           <SelectTrigger>
-            <SelectValue placeholder="Escolha o funil" />
+            <SelectValue placeholder={t("Escolha o funil")} />
           </SelectTrigger>
           <SelectContent>
             {pipelines.map((p) => (
@@ -83,7 +111,7 @@ function CreateOrMoveLeadForm({
         </Select>
       </div>
       <div className="space-y-1">
-        <Label>Etapa</Label>
+        <Label>{t("Etapa")}</Label>
         <Select
           value={config.stage_id}
           onValueChange={(v) => onChange({ ...config, stage_id: v })}
@@ -117,8 +145,16 @@ function SendWhatsappForm({
   config,
   onChange,
 }: FormProps<{ channel_session_id: string; template: string }>) {
+  const t = useT();
   const { data: sessions } = useChannelSessions();
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  // Os campos cadastrados no funil (Configurações › Funis) viram botões: quem
+  // monta a mensagem clica em "Serviço" em vez de adivinhar o nome interno. O
+  // token é só a chave — `renderTemplate` a resolve em `lead.custom_fields`.
+  const pipeline = useDefaultPipeline(true);
+  const camposDoFormulario = camposDoFunil(pipeline.data?.pipeline.settings ?? null)
+    .filter((f) => !TEMPLATE_VARS.some((v) => v.token === `{{${f.key}}}`))
+    .map((f) => ({ token: `{{${f.key}}}`, label: f.label }));
 
   const insertVar = (token: string) => {
     const el = textareaRef.current;
@@ -136,13 +172,13 @@ function SendWhatsappForm({
   return (
     <div className="space-y-2">
       <div className="space-y-1">
-        <Label>Número de WhatsApp</Label>
+        <Label>{t("Número de WhatsApp")}</Label>
         <Select
           value={config.channel_session_id}
           onValueChange={(v) => onChange({ ...config, channel_session_id: v })}
         >
           <SelectTrigger>
-            <SelectValue placeholder="Escolha o número" />
+            <SelectValue placeholder={t("Escolha o número")} />
           </SelectTrigger>
           <SelectContent>
             {(sessions ?? []).map((s) => (
@@ -154,14 +190,14 @@ function SendWhatsappForm({
         </Select>
         {(sessions ?? []).some((s) => s.status !== "WORKING") ? (
           <p className="text-xs text-muted-foreground">
-            Números desconectados aparecem desabilitados — reconecte em Conexões antes de usar.
+            {t("Números desconectados aparecem desabilitados — reconecte em Conexões antes de usar.")}
           </p>
         ) : null}
       </div>
       <div className="space-y-1">
-        <Label>Mensagem</Label>
+        <Label>{t("Mensagem")}</Label>
         <div className="flex flex-wrap gap-1">
-          {TEMPLATE_VARS.map((v) => (
+          {[...TEMPLATE_VARS, ...camposDoFormulario].map((v) => (
             <Button
               key={v.token}
               type="button"
@@ -184,8 +220,7 @@ function SendWhatsappForm({
           {/* NÃO cravar "7h e 22h": a janela passou a vir dos ajustes DO NÚMERO
               (Conexões), no fuso da sua organização, e quem a mudou lá veria a
               tela continuar prometendo outro horário. Rótulo visível é contrato. */}
-          Respeitamos a janela de envio e o limite diário configurados para esse número em
-          Conexões — fora da janela, a mensagem espera a próxima.
+          {t("Respeitamos a janela de envio e o limite diário configurados para esse número em Conexões — fora da janela, a mensagem espera a próxima.")}
         </p>
       </div>
     </div>
@@ -209,6 +244,7 @@ function SendAiMessageForm({
   config,
   onChange,
 }: FormProps<{ agent_id: string; channel_session_id: string; instruction: string }>) {
+  const t = useT();
   const { data: agentes } = useAgentsList();
   const { data: sessions } = useChannelSessions();
   const publicados = (agentes ?? []).filter((a) => Boolean(a.published_version_id));
@@ -217,37 +253,37 @@ function SendAiMessageForm({
   return (
     <div className="space-y-3">
       <div className="space-y-1">
-        <Label>Qual agente escreve</Label>
+        <Label>{t("Qual agente escreve")}</Label>
         <Select
           value={config.agent_id}
           onValueChange={(v) => onChange({ ...config, agent_id: v })}
         >
           <SelectTrigger>
-            <SelectValue placeholder="Escolha o agente" />
+            <SelectValue placeholder={t("Escolha o agente")} />
           </SelectTrigger>
           <SelectContent>
             {(agentes ?? []).map((a) => (
               <SelectItem key={a.id} value={a.id} disabled={!a.published_version_id}>
-                {a.name + (a.published_version_id ? "" : " — não publicado")}
+                {a.name + (a.published_version_id ? "" : t(" — não publicado"))}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">
           {semPublicado
-            ? "Nenhum agente está publicado. Publique um em Agentes de IA para poder usá-lo aqui."
-            : "Ele escreve com o mesmo tom e o mesmo conhecimento que usa no atendimento."}
+            ? t("Nenhum agente está publicado. Publique um em Agentes de IA para poder usá-lo aqui.")
+            : t("Ele escreve com o mesmo tom e o mesmo conhecimento que usa no atendimento.")}
         </p>
       </div>
 
       <div className="space-y-1">
-        <Label>Número de WhatsApp</Label>
+        <Label>{t("Número de WhatsApp")}</Label>
         <Select
           value={config.channel_session_id}
           onValueChange={(v) => onChange({ ...config, channel_session_id: v })}
         >
           <SelectTrigger>
-            <SelectValue placeholder="Escolha o número" />
+            <SelectValue placeholder={t("Escolha o número")} />
           </SelectTrigger>
           <SelectContent>
             {(sessions ?? []).map((s) => (
@@ -260,7 +296,7 @@ function SendAiMessageForm({
       </div>
 
       <div className="space-y-1">
-        <Label htmlFor="ai-instruction">O que a IA deve fazer com os dados</Label>
+        <Label htmlFor="ai-instruction">{t("O que a IA deve fazer com os dados")}</Label>
         <Textarea
           id="ai-instruction"
           rows={4}
@@ -273,9 +309,7 @@ function SendAiMessageForm({
           }
         />
         <p className="text-xs text-muted-foreground">
-          O agente já sabe que é a PRIMEIRA mensagem, logo depois de a pessoa preencher o
-          formulário, e recebe todos os campos que ela respondeu. Aqui você diz o que fazer com
-          eles — quanto mais concreto, melhor a mensagem.
+          {t("O agente já sabe que é a PRIMEIRA mensagem, logo depois de a pessoa preencher o formulário, e recebe todos os campos que ela respondeu. Aqui você diz o que fazer com eles — quanto mais concreto, melhor a mensagem.")}
         </p>
       </div>
     </div>
@@ -283,10 +317,11 @@ function SendAiMessageForm({
 }
 
 function AddTagForm({ config, onChange }: FormProps<{ tags: string[] }>) {
+  const t = useT();
   const [text, setText] = React.useState(config.tags.join(", "));
   return (
     <div className="space-y-1">
-      <Label>Tags (separadas por vírgula)</Label>
+      <Label>{t("Tags (separadas por vírgula)")}</Label>
       <Input
         value={text}
         onChange={(e) => {
@@ -304,13 +339,14 @@ function AddTagForm({ config, onChange }: FormProps<{ tags: string[] }>) {
 }
 
 function AssignOwnerForm({ config, onChange }: FormProps<{ user_id: string }>) {
+  const t = useT();
   const { data: members } = useAssignableMembers(true);
   return (
     <div className="space-y-1">
-      <Label>Atendente</Label>
+      <Label>{t("Atendente")}</Label>
       <Select value={config.user_id} onValueChange={(v) => onChange({ user_id: v })}>
         <SelectTrigger>
-          <SelectValue placeholder="Escolha o atendente" />
+          <SelectValue placeholder={t("Escolha o atendente")} />
         </SelectTrigger>
         <SelectContent>
           {(members ?? []).map((m) => (
@@ -324,10 +360,90 @@ function AssignOwnerForm({ config, onChange }: FormProps<{ user_id: string }>) {
   );
 }
 
+/**
+ * `create_task` (#1540) — o formulário do lembrete que NÃO vira mensagem.
+ *
+ * Atribuição nominal (`dono_do_lead`) é o padrão e continua sendo a opção que o
+ * operador mantém quando o dono do negócio muda; quem quiser fixar uma pessoa
+ * escolhe na lista dos atendentes ativos (mesma lista do `assign_owner`).
+ */
+function CreateTaskForm({
+  config,
+  onChange,
+}: FormProps<{
+  titulo: string;
+  vence_em_dias: number;
+  atribuir_a: "dono_do_lead" | { usuario_id: string };
+  prioridade: string;
+}>) {
+  const t = useT();
+  const { data: members } = useAssignableMembers(true);
+  const atribuido =
+    typeof config.atribuir_a === "object" ? config.atribuir_a.usuario_id : "dono_do_lead";
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      <div className="space-y-1 sm:col-span-2">
+        <Label>{t("Título da tarefa")}</Label>
+        <Input
+          value={config.titulo}
+          onChange={(e) => onChange({ ...config, titulo: e.target.value })}
+          placeholder={t("Ligar para {{contact.name}} sobre {{lead.title}}")}
+        />
+      </div>
+      <div className="space-y-1">
+        <Label>{t("Vence em (dias)")}</Label>
+        <Input
+          type="number"
+          min={0}
+          max={365}
+          value={config.vence_em_dias}
+          onChange={(e) => onChange({ ...config, vence_em_dias: Number(e.target.value) })}
+        />
+      </div>
+      <div className="space-y-1">
+        <Label>{t("Prioridade")}</Label>
+        <Select value={config.prioridade} onValueChange={(v) => onChange({ ...config, prioridade: v })}>
+          <SelectTrigger>
+            <SelectValue placeholder={t("Prioridade")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="low">{t("Baixa")}</SelectItem>
+            <SelectItem value="medium">{t("Média")}</SelectItem>
+            <SelectItem value="high">{t("Alta")}</SelectItem>
+            <SelectItem value="urgent">{t("Urgente")}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1 sm:col-span-2">
+        <Label>{t("Atribuir a")}</Label>
+        <Select
+          value={atribuido}
+          onValueChange={(v) =>
+            onChange({ ...config, atribuir_a: v === "dono_do_lead" ? "dono_do_lead" : { usuario_id: v } })
+          }
+        >
+          <SelectTrigger>
+            <SelectValue placeholder={t("Dono do negócio")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="dono_do_lead">{t("Dono do negócio")}</SelectItem>
+            {(members ?? []).map((m) => (
+              <SelectItem key={m.user_id} value={m.user_id}>
+                {m.full_name ?? m.user_id.slice(0, 8)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  );
+}
+
 function CallWebhookForm({
   config,
   onChange,
-}: FormProps<{ url: string; secret?: string; secret_enc?: string }>) {
+}: FormProps<{ url: string; secret?: string; secret_enc?: string; include_owner?: boolean }>) {
+  const t = useT();
   // O segredo é write-only: o servidor guarda cifrado (secret_enc) e nunca
   // devolve o valor. Digitar aqui envia `secret` novo; deixar em branco
   // preserva o secret_enc existente no round-trip do editor.
@@ -335,7 +451,7 @@ function CallWebhookForm({
   return (
     <div className="space-y-2">
       <div className="space-y-1">
-        <Label>Endereço (URL)</Label>
+        <Label>{t("Endereço (URL)")}</Label>
         <Input
           type="url"
           value={config.url}
@@ -358,10 +474,80 @@ function CallWebhookForm({
         />
         <p className="text-xs text-muted-foreground">
           {hasStoredSecret
-            ? "Já existe um segredo guardado com segurança. Digitar aqui substitui; limpar remove."
-            : "Se preencher, enviaremos uma assinatura para o outro sistema conferir que fomos nós."}
+            ? t("Já existe um segredo guardado com segurança. Digitar aqui substitui; limpar remove.")
+            : t("Se preencher, enviaremos uma assinatura para o outro sistema conferir que fomos nós.")}
+        </p>
+        {/* O guia de quem recebe (#1529). Pelo CAMINHO, em texto, e não link:
+            numa instalação de marca própria um link para o repositório de
+            origem apareceria para o cliente do revendedor — mesmo precedente
+            do UpdatePanel, que aponta o CHANGELOG pelo nome do arquivo. */}
+        <p className="text-xs text-muted-foreground">
+          {t("Como o outro sistema confere a assinatura e reconhece reenvios: guia de integração em docs/integracao/webhooks-de-saida.md, na documentação do projeto.")}
         </p>
       </div>
+      {/* Opt-in do responsável (#1612) — DESLIGADO é o padrão, e a frase diz o
+          que muda no corpo: quem lê esta tela é justamente quem vai receber o
+          POST. "Incluir" aqui é a mesma palavra do schema (`include_owner`),
+          para o rótulo e o campo não parecerem coisas diferentes. */}
+      <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+        <div className="space-y-0.5">
+          <Label>{t("Incluir o responsável no corpo")}</Label>
+          <p className="text-xs text-muted-foreground">
+            {t(
+              "Padrão: o aviso não diz quem atende. Ligue só se o outro sistema precisar do nome da equipe.",
+            )}
+          </p>
+        </div>
+        <Switch
+          checked={config.include_owner === true}
+          onCheckedChange={(v) => onChange({ ...config, include_owner: v ? true : undefined })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function StartMessageFlowForm({ config, onChange }: FormProps<{ flow_pointer_id: string }>) {
+  const t = useT();
+  const { data, isLoading } = useQuery({
+    queryKey: ["followup", "flows", "list"],
+    queryFn: async () => {
+      const res = await apiClient.get<{ data: FollowupFlowPointerRow[] }>(
+        "/api/v1/ai/followup-flows",
+      );
+      return res.data;
+    },
+  });
+  const active = (data ?? []).filter((f) => f.status === "active");
+
+  return (
+    <div className="space-y-1">
+      <Label>{t("Fluxo de follow-up")}</Label>
+      <Select
+        value={config.flow_pointer_id}
+        onValueChange={(v) => onChange({ flow_pointer_id: v })}
+        disabled={isLoading}
+      >
+        <SelectTrigger>
+          <SelectValue placeholder={t("Escolha um fluxo publicado")} />
+        </SelectTrigger>
+        <SelectContent>
+          {active.map((f) => (
+            <SelectItem key={f.id} value={f.id}>
+              {f.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {!isLoading && active.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          {t("Nenhum fluxo ativo. Publique um follow-up em Follow-ups para usá-lo aqui.")}
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          {t("Só entram fluxos publicados e ativos.")}
+        </p>
+      )}
     </div>
   );
 }
@@ -412,6 +598,20 @@ export function ActionConfigForm({
     case "call_webhook":
       return (
         <CallWebhookForm
+          config={action.config}
+          onChange={(config) => onChange({ type: action.type, config })}
+        />
+      );
+    case "start_message_flow":
+      return (
+        <StartMessageFlowForm
+          config={action.config}
+          onChange={(config) => onChange({ type: action.type, config })}
+        />
+      );
+    case "create_task":
+      return (
+        <CreateTaskForm
           config={action.config}
           onChange={(config) => onChange({ type: action.type, config })}
         />

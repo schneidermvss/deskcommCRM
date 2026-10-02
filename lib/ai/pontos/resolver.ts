@@ -39,11 +39,32 @@ import { PONTO_POR_ID, type PontoDeIa } from "./registro";
 
 /** De onde a escolha efetiva veio — vai para a tela e para o log. */
 export type OrigemDaEscolha =
+  | "fixo_do_produto"
   | "agente_publicado"
   | "binding"
   | "variavel_de_ambiente"
   | "herdado_de_quem_chamou"
-  | "padrao_da_organizacao";
+  | "padrao_da_organizacao"
+  /** O Jev mediu e a nota dele decidiu. Também a linha de falha do clima sem reserva (ver Execuções). */
+  | "jev"
+  /**
+   * O Jev respondeu e a resposta dele não decidiu nada: a IA de sempre decidiu,
+   * ou, sem ela, a regra de antes. Também a linha de falha do Jev numa tarefa do
+   * turno (a manipulação, o roteador, a resposta ao follow-up): o turno seguiu como sem ele (ver Execuções).
+   */
+  | "jev_observacao"
+  /**
+   * O clique em "Testar classificação" do roteador: custou (R8), mas não
+   * atendeu ninguém nem entra na comparação (R5).
+   */
+  | "jev_teste"
+  /**
+   * O Jev estava ligado e não respondeu: a IA de sempre mediu no lugar dele. No
+   * roteador decidindo, é a linha de ERRO do Jev que a leva (`lib/ai/decisao/roteador.ts`).
+   */
+  | "reserva_do_jev"
+  /** Observação: a IA de sempre falhou, e a nota do Jev, já medida, decidiu. */
+  | "jev_cobriu";
 
 export const EXPLICACAO_DA_ORIGEM: Record<OrigemDaEscolha, string> = {
   agente_publicado: "Definido na versão publicada do agente.",
@@ -52,6 +73,17 @@ export const EXPLICACAO_DA_ORIGEM: Record<OrigemDaEscolha, string> = {
   herdado_de_quem_chamou:
     "Herdado de quem disparou a chamada — o agente publicado, ou o roteador de intenção.",
   padrao_da_organizacao: "Usando o padrão da organização.",
+  fixo_do_produto: "O produto resolve este ponto sozinho — não há modelo a escolher.",
+  // Duas origens, uma por desfecho: a frase única ("se ele está em observação,
+  // quem decide é…") não dizia o que aconteceu NAQUELA mensagem.
+  jev: "O Jev decidiu.",
+  // Não "quem decidiu foi a IA de sempre": a mesma origem vale quando ela
+  // falhou (valeu a regra de antes). O que é verdade nas duas é que ele não
+  // decidiu. O clique de teste, que não entra na comparação, tem a sua.
+  jev_observacao: "O Jev observou: a resposta dele ficou registrada para comparar, e não decidiu nada.",
+  jev_teste: "Teste na tela do roteador — não entra na comparação.",
+  reserva_do_jev: "O Jev não respondeu; a IA de sempre mediu no lugar dele.",
+  jev_cobriu: "A IA de sempre falhou, mas o Jev já tinha medido esta mensagem: nada se perdeu.",
 };
 
 /** Uma linha de `ai_purpose_bindings`, já filtrada por organização. */
@@ -111,6 +143,7 @@ export interface DecisaoDeBinding {
  */
 export const PONTOS_DO_AGENTE_PUBLICADO: ReadonlySet<string> = new Set([
   "agent_turn",
+  "agent_preview",
   "operator_turn",
 ]);
 
@@ -142,14 +175,42 @@ export const PONTOS_QUE_HERDAM_DO_AGENTE: ReadonlySet<string> = new Set([
   "jailbreak_detect",
   "promise_semantic",
   "compaction",
+  "flush",
   "checkpoint",
   "draft_suggestion",
   "automation_ai_message",
+  "prospecting_agent_setup_chat",
+  // migration 0281 — a consulta interna da equipe sobre um caso herda do agente
+  // que ABRIU aquele caso (`lib/agent-engine/agent/conversa-do-caso.ts` passa
+  // `model` e `llmOverride` no mesmo objeto). NUNCA em
+  // `PONTOS_DO_AGENTE_PUBLICADO`: lá a escolha pertence à versão publicada, o
+  // painel vira somente leitura, e "configurável por organização" morreria.
+  "case_chat",
 ]);
 
 export function decidirBinding(entrada: EntradaDaDecisao): DecisaoDeBinding {
   const ponto = PONTO_POR_ID.get(entrada.pontoId);
   const avisos: string[] = [];
+
+  // 0 · Ponto FIXO responde por si, antes de qualquer cadeia.
+  //
+  // ⚠️ Sem este degrau, um ponto fixo percorria a resolução inteira e caía no
+  // padrão da organização — e a tela anunciava `claude-sonnet-5` em "Ouvir o
+  // áudio do cliente", ao lado do texto que diz "usa o padrão de transcrição
+  // da OpenAI". A mesma tela afirmando duas coisas incompatíveis.
+  //
+  // Modelo de conversa não transcreve áudio: anunciar um ali manda quem opera
+  // caçar um problema que não existe, ou trocar o modelo errado.
+  if (ponto?.fixo?.usa) {
+    return {
+      provider: ponto.fixo.usa.provider,
+      modelId: ponto.fixo.usa.modelId,
+      credentialId: null,
+      baseUrl: null,
+      origem: "fixo_do_produto",
+      avisos,
+    };
+  }
 
   // 1 · O agente publicado manda nos pontos que são o próprio agente.
   if (PONTOS_DO_AGENTE_PUBLICADO.has(entrada.pontoId) && entrada.agentePublicado !== null) {

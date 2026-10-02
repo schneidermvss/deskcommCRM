@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET/PUT /api/v1/pipelines/[id]/agent-mapping — quem diz ao agente onde ficam
  * as etapas DESTE funil.
@@ -31,6 +32,7 @@ import {
   type EtapaDoMapa,
 } from "@/lib/leads/agent-mapping";
 import { createClient } from "@/lib/supabase/server";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -88,6 +90,7 @@ const bodySchema = z.object({
  * a regra do mapeamento carregar um campo que ela nunca lê.
  */
 type EtapaComAutoria = EtapaDoMapa & {
+  avisar_na_central?: boolean | null;
   last_change_actor_kind: string | null;
   last_change_at: string | null;
 };
@@ -111,7 +114,9 @@ async function lerFunil(
     // A autoria entra na MESMA leitura que a tela de etapas já faz. Uma segunda
     // consulta só para ela seria um round-trip por render numa tela de
     // configuração — e um caminho a mais para a lista e a autoria divergirem.
-    .select("id, name, is_won, is_lost, agent_stage_hint, last_change_actor_kind, last_change_at")
+    .select(
+      "id, name, is_won, is_lost, win_probability, agent_stage_hint, avisar_na_central, last_change_actor_kind, last_change_at",
+    )
     .eq("organization_id", orgId)
     .eq("pipeline_id", pipelineId)
     .eq("is_archived", false)
@@ -143,6 +148,7 @@ function corpo(etapas: EtapaComAutoria[]) {
       name: e.name,
       is_won: e.is_won,
       is_lost: e.is_lost,
+      avisar_na_central: e.avisar_na_central === true,
       last_change_actor_kind: e.last_change_actor_kind ?? null,
       last_change_at: e.last_change_at ?? null,
     })),
@@ -154,13 +160,14 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
   const requestId = randomUUID();
   const authz = await requireRole("manager", { requestId, resource: "pipeline_agent_mapping" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
 
   const { id: pipelineId } = await ctx.params;
   const supabase = await createClient();
 
   try {
     const funil = await lerFunil(supabase, authz.org.orgId, pipelineId);
-    if (!funil) return fail("not_found", "Funil não encontrado.", 404, { requestId });
+    if (!funil) return fail("not_found", t("Funil não encontrado."), 404, { requestId });
     return ok(corpo(funil.etapas), { requestId });
   } catch (err) {
     return fail("internal_error", (err as Error).message, 500, { requestId });
@@ -168,9 +175,13 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
 }
 
 export async function PUT(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("manager", { requestId, resource: "pipeline_agent_mapping" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const orgId = authz.org.orgId;
 
   const { id: pipelineId } = await ctx.params;
@@ -179,14 +190,14 @@ export async function PUT(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   try {
     json = await req.json();
   } catch {
-    return fail("invalid_request", "Corpo não é JSON válido.", 400, { requestId });
+    return fail("invalid_request", t("Corpo não é JSON válido."), 400, { requestId });
   }
 
   const parsed = bodySchema.safeParse(json);
   if (!parsed.success) {
     return fail(
       "validation_failed",
-      "Envie o mapeamento completo dos sete passos do atendimento.",
+      t("Envie o mapeamento completo dos sete passos do atendimento."),
       422,
       { requestId, details: parsed.error.flatten() },
     );
@@ -202,7 +213,7 @@ export async function PUT(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   }
   // Pipeline de outra org morre AQUI, antes de qualquer escrita: responder 404
   // depois de gravar seria pior que responder 200.
-  if (!funil) return fail("not_found", "Funil não encontrado.", 404, { requestId });
+  if (!funil) return fail("not_found", t("Funil não encontrado."), 404, { requestId });
 
   const { mapeamento } = parsed.data;
 
@@ -273,7 +284,7 @@ export async function PUT(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   // inclusive se um update parcial deixou o funil diferente do mapa enviado.
   try {
     const depois = await lerFunil(supabase, orgId, pipelineId);
-    if (!depois) return fail("not_found", "Funil não encontrado.", 404, { requestId });
+    if (!depois) return fail("not_found", t("Funil não encontrado."), 404, { requestId });
     return ok(corpo(depois.etapas), { requestId });
   } catch (err) {
     return fail("internal_error", (err as Error).message, 500, { requestId });

@@ -1,3 +1,5 @@
+import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
+import { protecaoAgendaSupabase } from "@/lib/agenda/protecao-followup";
 /**
  * Ação `send_ai_message` — "Mensagem escrita pela IA".
  *
@@ -14,21 +16,32 @@
  */
 import { registerAction } from "@/lib/automation/actions";
 import type { ActionCtx, ActionResultDetail } from "@/lib/automation/types";
-import { ensureConversation } from "@/lib/automation/start-conversation";
+import { serviceForAutomation } from "@/lib/atendimento/origem-automacao";
+import { assertServiceBoundarySupabase } from "@/lib/atendimento/origem";
+import type { ServiceBoundary } from "@/lib/atendimento/fronteira";
 import { adiarAteAJanelaAbrir } from "@/lib/automation/janela-do-canal";
 import { checkDailyLimit, espacarEnvio } from "@/lib/automation/throttle";
 import { reportarEnvio, type MensagemEnviada } from "@/lib/automation/desfecho-do-envio";
 import { dadosDoFormularioDoContexto } from "@/lib/automation/dados-do-formulario";
+import { checarGuardasDeContato } from "@/lib/automation/guarda-do-contato";
 import { sendMessageHandler } from "@/app/api/v1/messages/_handler";
 import { gerarAbordagemDeFormulario } from "@/lib/agent-engine/agent/abordagem-de-formulario";
 import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { llmEdgeConfigFromEnv } from "@/lib/agent-engine/edge/llm/credentials";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
+import { autorizarContatoParaIA } from "@/lib/ai/elegibilidade/autorizacao";
+import { decidirPreGoLiveDoCanalViaSupabase } from "@/lib/ai/elegibilidade/consulta-pre-go-live";
 
 const TIPO = "send_ai_message";
 
 async function postponeUntil(ctx: ActionCtx, config: Record<string, unknown>): Promise<string | null> {
+  const contato = checarGuardasDeContato(ctx);
+  if (contato.ok) {
+    const protection = (await protecaoAgendaSupabase(ctx.admin, ctx.organizationId, [contato.contact.id])).get(contato.contact.id)!;
+    if (protection.motivo === "leitura_indisponivel") throw new Error("agenda_read_failed");
+    if (protection.adiar) return protection.reavaliar_em;
+  }
   const sessionId = typeof config.channel_session_id === "string" ? config.channel_session_id : null;
   if (!sessionId) return null;
   const foraDaJanela = await adiarAteAJanelaAbrir(ctx.admin, ctx.organizationId, sessionId);
@@ -45,18 +58,39 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
     return { type: TIPO, status: "failed", error: "missing_config" };
   }
 
-  const contact = ctx.context.contact as
-    | { id: string; is_blocked?: boolean; phone_number?: string | null }
-    | undefined;
-  if (!contact) return { type: TIPO, status: "skipped", detail: { reason: "no_contact" } };
-  if (contact.is_blocked) return { type: TIPO, status: "skipped", detail: { reason: "contact_blocked" } };
-  if (!contact.phone_number) return { type: TIPO, status: "skipped", detail: { reason: "no_phone" } };
+  // Guardas compartilhadas com send_whatsapp_message — ver guarda-do-contato.ts
+  // (esta ação nasceu sem o gate de consentimento que a irmã recebeu em
+  // 2026-08-25; a promessa do cabeçalho deste arquivo já dizia "mesmas
+  // guardas... importadas da irmã", e agora é verdade).
+  const guarda = checarGuardasDeContato(ctx);
+  if (!guarda.ok) return { type: TIPO, status: "skipped", detail: { reason: guarda.reason } };
+  const contact = guarda.contact;
+
+  // Esta ação abre um primeiro contato e por isso ainda não tem conversa para
+  // passar pelo gate comum. No pré-go-live ela precisa parar AQUI, antes da
+  // chamada paga ao modelo e antes de criar qualquer mensagem.
+  try {
+    const acesso = await decidirPreGoLiveDoCanalViaSupabase(ctx.admin, {
+      organizationId: ctx.organizationId,
+      channelSessionId: sessionId,
+      contactPhoneNumber: contact.phone_number,
+    });
+    if (!acesso.permite) {
+      return { type: TIPO, status: "skipped", detail: { reason: acesso.motivo } };
+    }
+  } catch (err) {
+    return {
+      type: TIPO,
+      status: "skipped",
+      detail: {
+        reason: "elegibilidade_indeterminada",
+        error: err instanceof Error ? err.message.slice(0, 160) : "erro",
+      },
+    };
+  }
 
   // ─── O texto ───────────────────────────────────────────────────────────────
   //
-  // Vem ANTES de abrir a conversa: se a IA não puder escrever, não faz sentido
-  // criar uma conversa vazia com o contato. E a chamada de modelo é a parte
-  // cara — falhar aqui evita o resto.
   let pool;
   try {
     pool = getRequestPool();
@@ -66,10 +100,14 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
     return { type: TIPO, status: "failed", error: "ia_indisponivel", detail: { reason: "ia_indisponivel" } };
   }
 
-  const { dados, origem, veioDeFormulario } = await dadosDoFormularioDoContexto(ctx);
+  const { dados, origem, origemDaAbordagem } = await dadosDoFormularioDoContexto(ctx);
 
+  let boundary: ServiceBoundary;
+  try { boundary = await serviceForAutomation(ctx, contact.id, sessionId); }
+  catch (error) { return { type: TIPO, status: "failed", error: error instanceof Error ? error.message : String(error) }; }
   let texto: string;
   try {
+    await assertAgendaEffectSupabase(ctx.admin, { organizationId: ctx.organizationId, contactId: contact.id });
     const gerado = await gerarAbordagemDeFormulario(pool, llmEdgeConfigFromEnv(env), {
       tenantId: ctx.organizationId,
       agentId,
@@ -77,7 +115,7 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
       instrucao,
       origem,
       dados,
-      veioDeFormulario,
+      origemDaAbordagem,
     });
     if (!gerado.ok) {
       return { type: TIPO, status: "failed", error: gerado.reason, detail: { reason: gerado.reason } };
@@ -99,13 +137,26 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
 
   // ─── O envio ───────────────────────────────────────────────────────────────
   try {
-    const conversationId = await ensureConversation(ctx.admin, ctx.organizationId, contact.id, sessionId);
+    const conversationId = boundary.conversation_id;
+    await assertServiceBoundarySupabase(ctx.admin, boundary);
+    // ELEGIBILIDADE: a IA vai FALAR com este contato agora, por decisão de uma
+    // regra de automação (tipicamente o `lead.created` de um formulário). Isso o
+    // torna elegível para a resposta dele ser atendida — sem isto, no gate
+    // `allowlist` a IA abriria a conversa e ignoraria o retorno do lead.
+    await autorizarContatoParaIA(ctx.admin, {
+      organizationId: ctx.organizationId,
+      contactId: contact.id,
+      reason: `automacao:${ctx.ruleId}`,
+    });
     await espacarEnvio(sessionId);
     const message = await sendMessageHandler(
       ctx.admin,
       {
         organization_id: ctx.organizationId,
-        actor: { type: "webhook_source", id: ctx.ruleId },
+        serviceBoundary: boundary,
+        proactiveContext: { organizationId: ctx.organizationId, contactId: contact.id },
+        // Disparada por regra, ESCRITA pela IA: o carimbo segue a autoria (#652).
+        actor: { type: "webhook_source", id: ctx.ruleId, textoEscritoPelaIA: true },
         requestId: `rule:${ctx.ruleId}`,
       },
       { conversation_id: conversationId, type: "text", body: texto } as Parameters<

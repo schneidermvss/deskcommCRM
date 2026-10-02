@@ -57,11 +57,17 @@ export const TOOLS_ATENDIMENTO = declararTools([
     risco: "atencao",
     // ⚠️ FORA de "atender", e a razão é o TETO — não o valor da capacidade.
     //
-    // O pacote "Atender" já exigia 18 vagas e, com as 3 que um agente novo
-    // costuma ter, chega a 21 num teto de 20: ligá-lo já era impossível sem
-    // desligar algo antes (o e2e `capacidades-do-agente` mede exatamente isso).
-    // Acrescentar esta capacidade ali levaria a 22 — pioraria um defeito
-    // conhecido em troca de nada, porque o pacote continuaria não cabendo.
+    // O pacote "Atender" exige 18 vagas, quase o teto inteiro por agente.
+    // Acrescentar esta capacidade ali empurraria para 19 um pacote que já é o
+    // maior — e, somado ao que um agente costuma trazer ligado, é ele que
+    // encosta no teto primeiro.
+    //
+    // ⚠️ A ARITMÉTICA DESTE PARÁGRAFO MUDOU e a decisão não. Ele dizia
+    // "18 + 3 = 21 num teto de 20: ligá-lo já era impossível". O teto foi para
+    // 25 quando o dono do produto ficou sem como ligar as capacidades de agenda,
+    // então 21 hoje CABE — o argumento de impossibilidade venceu. O que sustenta
+    // a escolha agora é folga, não bloqueio, e por isso a linha continua sendo
+    // candidata a voltar numa revisão dos pacotes.
     //
     // Fica em "vender", que tem folga, e continua alcançável em qualquer jornada
     // pelo modo avançado. Quando o teto ou o tamanho do pacote for revisto, esta
@@ -107,5 +113,42 @@ export const TOOLS_ATENDIMENTO = declararTools([
     oQueToca: "Atendimento",
     risco: "critico",
     pacotes: ["atender"],
+  },
+  {
+    name: "crm_start_conversation_and_send",
+    category: "write",
+    rotulo: "Iniciar conversa com cliente novo e enviar mensagem",
+    explicacao:
+      "Cria o cadastro do cliente se ele ainda não existir, abre uma conversa nova no número de " +
+      "WhatsApp escolhido e manda a primeira mensagem para ele — de verdade, no celular dele.",
+    oQueToca: "Atendimento",
+    risco: "critico",
+    // Nasce para automação externa (ex.: prospecção que acabou de captar um
+    // cliente novo), não para o agente conversacional em turno — por isso
+    // `apenasHumano` abaixo e o papel mínimo ficam acima do que o agente
+    // publicado alcança (ver tests/unit/capacidade-alcancavel-pelo-agente.test.ts).
+    pacotes: ["vender"],
+    apenasHumano: true,
+  },
+  {
+    name: "crm_create_conversation_draft",
+    category: "write",
+    rotulo: "Deixar texto sugerido para a pessoa revisar",
+    explicacao:
+      "Guarda um texto vindo de outro sistema (ERP, formulário) na conversa, para a pessoa que atende revisar e enviar. " +
+      "Nada sai para o cliente por conta desta ação: o texto aparece no campo de resposta com o aviso de origem, " +
+      "e só o clique de quem atende manda a mensagem.",
+    oQueToca: "Atendimento",
+    // `atencao`, não `critico`: a ação em si não alcança o cliente — ela prepara
+    // uma sugestão que uma pessoa precisa confirmar. O peso do envio continua
+    // sendo do `crm_send_whatsapp_message`, que segue `critico`.
+    risco: "atencao",
+    // "escalar", não "atender": o texto é deixado para uma PESSOA revisar e
+    // enviar, que é a jornada "Passar para um humano". E "atender" é o pacote
+    // que encosta no teto por agente: cada capacidade a mais ali é uma vaga que
+    // o dono precisa liberar para ligar a jornada — o mesmo motivo que tirou
+    // `crm_propose_contact_field` daqui. A conta que isso quebra está no e2e
+    // `capacidades-do-agente.spec.ts` (comentário de `TOOLS_DO_SEED`).
+    pacotes: ["escalar"],
   },
 ]);

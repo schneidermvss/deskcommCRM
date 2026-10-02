@@ -15,6 +15,8 @@ import type { Logger } from '../obs/logger';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { runModelCall, type LlmEdgeConfig } from '../edge/llm/run-model-call';
 import type { LeadContext } from '../edge/crm/get-lead-context';
+import { fusoDaOrganizacao } from './fuso-da-org';
+import { renderAgora } from '@/lib/tempo/agora';
 
 const CLASSIFY_INSTRUCTION =
   'Você é um classificador auxiliar de follow-up (NÃO responde ao lead). Classifique a ' +
@@ -53,22 +55,22 @@ export function parseFollowupClassification(text: string, classes: string[]): st
 }
 
 /**
- * Classifica a última resposta do lead em uma de `classes`. `candidateText` já
- * vem resolvido pelo chamador como "a última inbound DEPOIS do último
- * outbound, ou null" — sem candidato, NÃO chama o modelo: devolve 'no_reply'
- * direto (custo $0; espelha o caminho sem LLM de node-handlers.ts na expiração
- * de grace). Saída não-parseável/fora de `classes` → erro (o job re-tenta pela
- * fila; nunca adivinha uma classe errada — doutrina "sem preguiça").
+ * Classifica a última resposta do lead em uma de `classes`. `candidateText` é a
+ * resposta do lead ao envio do fluxo, já resolvida pelo chamador
+ * (`respostaAoEnvioDoFluxo` em followup-turn.ts) — e só existe chamada quando
+ * ela existe. Sem resposta não é classe: `no_reply` é
+ * decisão do motor quando a carência do nó vence (node-handlers.ts), nunca
+ * deste turno, que rodaria segundos depois do envio. Saída não-parseável/fora
+ * de `classes` → erro (o job re-tenta pela fila; nunca adivinha uma classe
+ * errada — doutrina "sem preguiça").
  */
 export async function classifyFollowupReply(
   db: pg.Pool,
   cfg: LlmEdgeConfig,
   ids: { tenantId: string; leadId: string; jobId: string },
-  args: { candidateText: string | null; classes: string[]; hint?: string; model?: string },
+  args: { candidateText: string; classes: string[]; hint?: string; model?: string },
   deps: { registry?: ProviderRegistry; log: Logger },
 ): Promise<string> {
-  if (args.candidateText === null) return 'no_reply';
-
   const call = await runModelCall(
     db,
     cfg,
@@ -117,12 +119,21 @@ export interface PropostaDeEsperaBruta {
   motivo: string;
 }
 
-function buildPlanMessage(context: LeadContext, now: Date, esperas: EsperaParaPlanejar[]): string {
+function buildPlanMessage(
+  context: LeadContext,
+  now: Date,
+  esperas: EsperaParaPlanejar[],
+  fuso: string,
+): string {
   return [
     PLAN_INSTRUCTION,
     '',
-    '## Agora',
-    now.toISOString(),
+    // Este bloco era `'## Agora'` seguido de `now.toISOString()` cru — o único
+    // relógio que o motor tinha, e meio relógio: sem dia da semana e sem fuso,
+    // ele não responde a pergunta que ESTE planejador faz, que é quando é
+    // aceitável falar com alguém. Passou a ser o mesmo `renderAgora` do turno,
+    // porque dois formatos de "## Agora" no mesmo motor viram dois vocabulários.
+    renderAgora(now, fuso),
     '',
     '## Esperas do fluxo, na ordem',
     ...esperas.map((e, i) =>
@@ -213,7 +224,17 @@ export async function planFollowupTiming(
       jobId: ids.jobId,
       purpose: 'followup_decide_timing',
       ...(args.model !== undefined ? { model: args.model } : {}),
-      messages: [{ role: 'user', content: buildPlanMessage(args.context, now, args.esperas) }],
+      messages: [
+        {
+          role: 'user',
+          content: buildPlanMessage(
+            args.context,
+            now,
+            args.esperas,
+            await fusoDaOrganizacao(db, ids.tenantId, deps.log),
+          ),
+        },
+      ],
     },
     { registry: deps.registry, log: deps.log },
   );

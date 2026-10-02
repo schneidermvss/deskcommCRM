@@ -1,6 +1,10 @@
-// Flat config (ESLint 9 / eslint-config-next 16 — `next lint` foi removido no
-// Next 16; o script `lint` chama o eslint CLI direto). Migração 1:1 do antigo
-// .eslintrc.json.
+// Flat config (`next lint` foi removido no Next 16; o script `lint` chama o
+// eslint CLI direto). Migração 1:1 do antigo .eslintrc.json.
+// Carrega o @next/eslint-plugin-next DIRETO, nunca o preset do
+// eslint-config-next: os plugins que ele traz (react 7.37.5, import 2.32.0,
+// jsx-a11y 6.10.2) só declaram peer eslint até ^9, e o react quebra no ESLint
+// 10 — importar "eslint-config-next/core-web-vitals" aqui derruba o lint com
+// "contextOrFilename.getFilename is not a function" (#297).
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextPlugin from "@next/eslint-plugin-next";
 import reactHooks from "eslint-plugin-react-hooks";
@@ -11,7 +15,10 @@ export default defineConfig([
   // `node_modules/` próprios) — nunca fonte deste repo; lintá-los explode o eslint
   // com dezenas de milhares de falsos positivos em JS gerado. (Na CI, checkout
   // limpo, o diretório nem existe.)
-  globalIgnores([".next/", "node_modules/", "dist/", "supabase/", "next-env.d.ts", ".claude/worktrees/"]),
+  // Cópias compiladas da demonstração e binários baixados pelo Playwright
+  // vivem no scratch local. Os scripts escritos à mão em .superpowers seguem
+  // sob lint; somente estes dois tipos de artefato gerado ficam de fora.
+  globalIgnores([".next/", "node_modules/", "dist/", "supabase/", "next-env.d.ts", ".claude/worktrees/", ".superpowers/**/bundles/", ".superpowers/**/playwright-browsers/"]),
   nextPlugin.configs["core-web-vitals"],
   reactHooks.configs.flat.recommended,
   ...tseslint.configs.recommended,

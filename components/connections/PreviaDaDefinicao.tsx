@@ -2,6 +2,8 @@
 import Image from "next/image";
 
 import { contarVariaveis, type BotaoDaDefinicao } from "@/lib/channels/template-conteudo";
+import { ArrowBendUpLeft, ArrowSquareOut, Checks, Phone } from "@/lib/ui/icons";
+import { useT } from "@/hooks/i18n/useT";
 
 /**
  * Como a mensagem vai chegar ao cliente.
@@ -35,6 +37,7 @@ export function PreviaDaDefinicao({
   rodape: string;
   botoes: BotaoDaDefinicao[];
 }) {
+  const t = useT();
   const vazia = !cabecalho && !midiaUrl && !corpo && !rodape && botoes.length === 0;
   const buracos = corpo ? contarVariaveis(corpo) : 0;
   // `{{3}}` sem `{{1}}` é recusado — a numeração é posicional e a lista de
@@ -45,40 +48,55 @@ export function PreviaDaDefinicao({
 
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-xs font-medium text-muted-foreground">Como o cliente vai ver</p>
+      <p className="text-xs font-medium text-muted-foreground">{t("Como o cliente vai ver")}</p>
 
       <div className="rounded-lg bg-muted/60 p-3">
         {vazia ? (
           <p className="text-xs italic text-muted-foreground">
-            Preencha o texto para ver a prévia.
+            {t("Preencha o texto para ver a prévia.")}
           </p>
         ) : (
-          <div className="max-w-[22rem] rounded-lg rounded-tl-sm bg-background p-2.5 shadow-sm">
-            {midiaUrl && (
-              // `unoptimized`: a URL é assinada e temporária, e o otimizador do
-              // Next a buscaria de novo depois de ela expirar.
-              <Image
-                src={midiaUrl}
-                alt="Cabeçalho"
-                width={320}
-                height={180}
-                unoptimized
-                className="mb-2 h-auto w-full rounded"
-              />
-            )}
-            {cabecalho && <p className="mb-1 text-sm font-semibold">{cabecalho}</p>}
-            {corpo && <p className="whitespace-pre-wrap text-sm leading-snug">{corpo}</p>}
-            {rodape && <p className="mt-1 text-[11px] text-muted-foreground">{rodape}</p>}
+          // COMO NO WHATSAPP: balão com a hora, e os botões FORA do balão, cada
+          // um no seu bloco com o ícone do tipo — é assim que o cliente vê, e é
+          // assim que a plataforma do provedor mostra a prévia.
+          <div className="max-w-[22rem]" data-previa-do-modelo>
+            <div className="rounded-lg rounded-tl-none bg-background p-2.5 shadow-sm">
+              {midiaUrl && (
+                // `unoptimized`: a URL é assinada e temporária, e o otimizador do
+                // Next a buscaria de novo depois de ela expirar.
+                <Image
+                  src={midiaUrl}
+                  alt={t("Cabeçalho")}
+                  width={320}
+                  height={180}
+                  unoptimized
+                  className="mb-2 h-auto w-full rounded-md"
+                />
+              )}
+              {cabecalho && <p className="mb-1 text-sm font-semibold">{cabecalho}</p>}
+              {corpo && <p className="whitespace-pre-wrap text-sm leading-snug">{corpo}</p>}
+              {rodape && <p className="mt-1 text-[11px] text-muted-foreground">{rodape}</p>}
+              <p className="mt-1 flex items-center justify-end gap-0.5 text-[10px] text-muted-foreground">
+                12:00 <Checks size={12} aria-hidden />
+              </p>
+            </div>
 
             {botoes.filter((b) => b.texto.trim()).length > 0 && (
-              <div className="mt-2 flex flex-col gap-1 border-t border-border pt-1.5">
+              <div className="mt-1 flex flex-col gap-1">
                 {botoes
                   .filter((b) => b.texto.trim())
-                  .map((b, i) => (
-                    <span key={i} className="text-center text-xs font-medium text-primary">
-                      {b.texto}
-                    </span>
-                  ))}
+                  .map((b, i) => {
+                    const Icone = b.tipo === "url" ? ArrowSquareOut : b.tipo === "phone_number" ? Phone : ArrowBendUpLeft;
+                    return (
+                      <span
+                        key={i}
+                        className="flex items-center justify-center gap-1.5 rounded-lg bg-background py-2 text-sm font-medium text-primary shadow-sm"
+                      >
+                        <Icone size={14} aria-hidden />
+                        {b.texto}
+                      </span>
+                    );
+                  })}
               </div>
             )}
           </div>
@@ -87,8 +105,8 @@ export function PreviaDaDefinicao({
 
       {faltando.length > 0 && (
         <p className="text-[11px] text-destructive">
-          Falta {faltando.map((n) => `{{${n}}}`).join(", ")} no texto. A numeração é sequencial e a
-          plataforma recusa quando há buraco.
+          {t("Falta")} {faltando.map((n) => `{{${n}}}`).join(", ")} {t("no texto.")}{" "}
+          {t("A numeração é sequencial e a plataforma recusa quando há buraco.")}
         </p>
       )}
     </div>

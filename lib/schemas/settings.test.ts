@@ -55,10 +55,10 @@ describe("tenantSchema", () => {
       cnpj: "12345678000190",
       timezone: "America/Sao_Paulo",
       locale: "pt-BR",
+      currency: "BRL",
       media_retention_days: 90,
       dpo_email: "dpo@acme.com",
       privacy_policy_url: "https://acme.com/privacy",
-      lost_reasons_extra: ["Sem orçamento"],
     });
     expect(r.success).toBe(true);
   });
@@ -70,12 +70,37 @@ describe("tenantSchema", () => {
       timezone: "UTC",
       locale: "pt-BR",
       media_retention_days: 5,
-      lost_reasons_extra: [],
     });
     expect(r.success).toBe(false);
   });
 
-  it("defaults lost_reasons_extra to empty array", () => {
+  it("não conhece mais `lost_reasons_extra` — o campo saiu do produto", () => {
+    const r = tenantSchema.safeParse({
+      display_name: "Acme",
+      legal_name: "Acme",
+      timezone: "UTC",
+      locale: "pt-BR",
+      currency: "BRL",
+      media_retention_days: 90,
+      lost_reasons_extra: ["Sem orçamento"],
+    });
+    expect(r.success).toBe(true);
+    // Zod ignora chave desconhecida; o que importa é ela NÃO sair do parse —
+    // é isso que impede a action de voltar a gravá-la sem ninguém notar.
+    if (r.success) expect("lost_reasons_extra" in r.data).toBe(false);
+  });
+
+  /**
+   * ⚠️ `currency` e OBRIGATORIA de proposito, e o contrario seria pior.
+   *
+   * Com `.default("BRL")`, qualquer salvamento que omitisse o campo — um
+   * chamador novo, um payload montado a mao — PISARIA a moeda de uma
+   * organizacao mexicana em silencio, porque a action grava a linha inteira.
+   * Sao dois chamadores conhecidos (o formulario e a propria action), os dois
+   * mandam o campo, e quem esquecer falha ALTO em vez de trocar a unidade do
+   * catalogo sem avisar.
+   */
+  it("exige a moeda em vez de assumir uma", () => {
     const r = tenantSchema.safeParse({
       display_name: "Acme",
       legal_name: "Acme",
@@ -83,8 +108,7 @@ describe("tenantSchema", () => {
       locale: "pt-BR",
       media_retention_days: 90,
     });
-    expect(r.success).toBe(true);
-    if (r.success) expect(r.data.lost_reasons_extra).toEqual([]);
+    expect(r.success).toBe(false);
   });
 });
 
@@ -125,5 +149,62 @@ describe("pipelineConfigPatchSchema", () => {
       lost_reasons: ["Concorrente", "Preço"],
     });
     expect(r.success).toBe(true);
+  });
+});
+
+describe("pipelineConfigPatchSchema — reabertura (#1538)", () => {
+  it("aceita os dois modos e a lista de campos copiáveis", () => {
+    for (const reabertura of ["mesmo_registro", "novo_negocio"]) {
+      expect(pipelineConfigPatchSchema.safeParse({ reabertura }).success).toBe(true);
+    }
+    expect(
+      pipelineConfigPatchSchema.safeParse({ reabertura_campos: ["tags", "value_cents"] }).success,
+    ).toBe(true);
+  });
+
+  it("recusa modo desconhecido e campo fora da lista", () => {
+    expect(pipelineConfigPatchSchema.safeParse({ reabertura: "NOVO_NEGOCIO" }).success).toBe(false);
+    expect(pipelineConfigPatchSchema.safeParse({ reabertura_campos: ["external_id"] }).success).toBe(
+      false,
+    );
+  });
+});
+
+describe("pipelineConfigPatchSchema — motivos de perda com categoria (#1537)", () => {
+  it("continua aceitando lost_reasons só de texto — nenhum funil migra dado", () => {
+    const r = pipelineConfigPatchSchema.safeParse({ lost_reasons: ["Preço", "Sem perfil"] });
+    expect(r.success).toBe(true);
+  });
+
+  it("aceita { label, categoria } junto de texto puro na mesma lista", () => {
+    const r = pipelineConfigPatchSchema.safeParse({
+      lost_reasons: ["Adiou", { label: "Não tinha o perfil", categoria: "Mérito" }],
+    });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.lost_reasons?.[1]).toEqual({ label: "Não tinha o perfil", categoria: "Mérito" });
+  });
+
+  it("recusa rótulo vazio/longo e categoria fora do teto", () => {
+    expect(pipelineConfigPatchSchema.safeParse({ lost_reasons: [{ label: "" }] }).success).toBe(false);
+    expect(
+      pipelineConfigPatchSchema.safeParse({ lost_reasons: [{ label: "x".repeat(81) }] }).success,
+    ).toBe(false);
+    expect(
+      pipelineConfigPatchSchema.safeParse({ lost_reasons: [{ label: "ok", categoria: "" }] }).success,
+    ).toBe(false);
+    expect(
+      pipelineConfigPatchSchema.safeParse({ lost_reasons: [{ label: "ok", categoria: "x".repeat(41) }] })
+        .success,
+    ).toBe(false);
+  });
+
+  it("recusa objeto sem label e o teto de 50 motivos continua valendo", () => {
+    expect(pipelineConfigPatchSchema.safeParse({ lost_reasons: [{ categoria: "Cliente" }] }).success).toBe(
+      false,
+    );
+    expect(
+      pipelineConfigPatchSchema.safeParse({ lost_reasons: Array.from({ length: 51 }, (_, i) => `m${i}`) })
+        .success,
+    ).toBe(false);
   });
 });

@@ -23,14 +23,22 @@ export interface AgentVersionRow {
   history_token_window: number;
   handoff_keywords: string[];
   handoff_tool_enabled: boolean;
+  proposal_ai_draft_enabled: boolean;
   cases_enabled: boolean;
   operator_enabled: boolean;
   operator_model: string | null;
   operator_tool_ids: string[];
   pipeline_ids: string[];
+  knowledge_source_ids: string[];
   split_messages: boolean;
   split_max_chars: number;
-  followup: { enabled: boolean; flow_pointer_ids: string[] };
+  inbound_debounce_ms: number | null;
+  followup: {
+    enabled: boolean;
+    flow_pointer_ids: string[];
+    callback_enabled?: boolean;
+    send_window?: { start: string; end: string; weekdays: number[] } | null;
+  };
   status: "draft" | "published" | "superseded" | "archived";
   published_at: string | null;
   superseded_at: string | null;
