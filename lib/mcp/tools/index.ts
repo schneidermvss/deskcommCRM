@@ -51,6 +51,7 @@ import {
   crmSaveOrgMemory,
 } from "./evolucao";
 import { crmListContactOrders, crmSearchProducts, crmSearchVehicles } from "./comercio";
+import { crmLookupFipePrice } from "./fipe";
 import { crmGetHonorariosContrato, crmListHonorariosParcelas } from "./honorarios";
 import { crmDescribeExternalData, crmQueryExternalData } from "./dados-externos";
 import { crmListPrivacyRequests } from "./privacidade";
@@ -122,6 +123,7 @@ export const allTools: ReadonlyArray<McpToolDefinition> = [
   crmListContactOrders,
   crmSearchProducts,
   crmSearchVehicles,
+  crmLookupFipePrice,
   crmGetHonorariosContrato,
   crmListHonorariosParcelas,
   crmPrepararProposta,

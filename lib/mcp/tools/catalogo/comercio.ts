@@ -41,6 +41,18 @@ export const TOOLS_COMERCIO = declararTools([
     pacotes: ["vender", "atender"],
   },
   {
+    // Genérica — qualquer organização que negocie veículo usado pode ligar.
+    // Fonte é a API pública da Tabela FIPE, não dado da organização.
+    name: "crm_lookup_fipe_price",
+    category: "read",
+    rotulo: "Consultar preço na Tabela FIPE",
+    explicacao:
+      "Consulta o preço de referência da Tabela FIPE de um veículo (marca, modelo, ano), para o assistente responder com o valor de tabela em vez de estimar — útil para avaliar veículo de troca ou justificar uma proposta.",
+    oQueToca: "Preço de veículo (Tabela FIPE)",
+    risco: "seguro",
+    pacotes: ["vender", "atender"],
+  },
+  {
     name: "crm_draft_proposal",
     category: "write",
     rotulo: "Rascunhar proposta comercial",

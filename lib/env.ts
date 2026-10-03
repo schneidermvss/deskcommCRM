@@ -228,6 +228,14 @@ const schema = z.object({
   VERCEL_AI_GATEWAY_URL: z.string().optional().default(""),
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   OPENAI_API_KEY: z.string().optional().default(""),
+  /**
+   * Token opcional da API pública da Tabela FIPE (fipe.online) — usada por
+   * `crm_lookup_fipe_price`. Sem ele, a consulta funciona igual, só com o
+   * teto gratuito de 500/dia por IP em vez de 1000/dia. Não é segredo do
+   * produto: é uma chave de terceiro, opcional, sem a qual a ferramenta
+   * degrada (continua funcionando, só com teto menor).
+   */
+  FIPE_API_TOKEN: z.string().optional().default(""),
   // Esforço de raciocínio dos modelos da OpenAI (o*, gpt-5*, gpt-6*). `z.string()`
   // e NUNCA `z.enum` (motivo mais abaixo, em AGENT_DISPATCH_CONSUMER): quem valida
   // a grafia é o boot do worker, em `lib/agent-engine/env.ts`.
