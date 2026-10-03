@@ -17,6 +17,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 
 import { fail, ok } from "@/lib/api/wrappers";
+import { requireSupportWrite } from "@/lib/impersonate/support";
 import { McpAuthError, validateBearerToken } from "@/lib/mcp/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -55,6 +56,9 @@ export async function POST(req: NextRequest): Promise<Response> {
   if (!auth.scopes.includes("prospeccao:write")) {
     return fail("forbidden", "Token sem o escopo prospeccao:write.", 403, { requestId });
   }
+
+  const supportDenied = await requireSupportWrite(auth.organizationId);
+  if (supportDenied) return supportDenied;
 
   let rawBody: unknown;
   try {
