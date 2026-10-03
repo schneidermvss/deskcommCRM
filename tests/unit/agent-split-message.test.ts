@@ -101,6 +101,74 @@ describe("splitIntoBubbles — o parágrafo é a bolha", () => {
   });
 });
 
+// URL, endereço e dado atômico nunca são cortados: ponto/?/! só encerram frase
+// quando seguidos de espaço ou fim do texto. Antes, o "?" de "ul?q=" e o "." de
+// "waze.com" viravam fim de "sentença" e a URL saía em mensagens separadas.
+describe("splitIntoBubbles — dado atômico nunca é partido", () => {
+  const URL_WAZE =
+    "https://waze.com/ul?q=BR-116%2C%206225%2C%20Novo%20Hamburgo%2C%20RS&navigate=yes";
+
+  it("1) frase com emoji e endereço, abaixo do teto, sai em UMA mensagem", () => {
+    const t = "Claro 😊 O endereço é BR-116, 6225, Novo Hamburgo/RS.";
+    expect(splitIntoBubbles(t, 600)).toEqual([t]);
+  });
+
+  it("2) frase + URL do Waze completa sai em UMA mensagem com a URL inteira", () => {
+    const t = `Claro! Para ir até a loja, abra a rota no Waze: ${URL_WAZE}`;
+    expect(splitIntoBubbles(t, 600)).toEqual([t]);
+  });
+
+  it("2b) mesmo com teto menor que o parágrafo, a URL do Waze nunca é cortada", () => {
+    const t = `Claro! Para ir até a loja, abra a rota no Waze: ${URL_WAZE}`;
+    const out = splitIntoBubbles(t, 100);
+    expect(out.filter((b) => b.includes("waze.com"))).toHaveLength(1);
+    expect(out.join(" ")).toContain(URL_WAZE);
+    for (const b of out) expect(b).not.toMatch(/[?&=%]$/);
+  });
+
+  it("3) duas frases curtas no mesmo parágrafo saem em UMA mensagem", () => {
+    const t = "Trabalhamos com financiamento. Também avaliamos seu veículo na troca.";
+    expect(splitIntoBubbles(t, 600)).toEqual([t]);
+  });
+
+  it("4) vários parágrafos curtos: uma bolha por parágrafo, nunca por frase", () => {
+    const t = [
+      "Oi! Tudo bem? Posso te ajudar.",
+      "Temos o Onix 2020. Ele está revisado.",
+      "Quer agendar uma visita? Posso te passar o endereço.",
+    ].join("\n\n");
+    const out = splitIntoBubbles(t, 600);
+    expect(out).toHaveLength(3);
+    expect(out[1]).toBe("Temos o Onix 2020. Ele está revisado.");
+  });
+
+  it("5) URL com ? & = % # - _ / sai intacta mesmo num parágrafo que estoura o teto", () => {
+    const url = "https://exemplo.com.br/a_b-c/d?x=1&y=%C3%A9&z=a_b-c#secao-2";
+    const t = `Veja os detalhes completos do veículo no anúncio. Link: ${url} Qualquer dúvida me chame!`;
+    const out = splitIntoBubbles(t, 60);
+    expect(out.some((b) => b.includes(url))).toBe(true);
+    expect(out.join(" ")).toBe(t);
+  });
+
+  it("6) resposta acima do teto parte só em fim de frase e preserva URL e dados atômicos", () => {
+    const frases = [
+      "Nosso endereço é BR-116, 6225, Novo Hamburgo/RS.",
+      "O Onix 1.0 LT 2020 placa ABC1D23 sai por R$ 49.990,00 à vista.",
+      "Ligue para (51) 99999-1234 se preferir falar com a gente.",
+      `Rota no Waze: ${URL_WAZE}`,
+    ];
+    const t = frases.join(" ");
+    const out = splitIntoBubbles(t, 80);
+    expect(out.length).toBeGreaterThan(1);
+    expect(out.join(" ")).toBe(t);
+    for (const atomo of [URL_WAZE, "BR-116, 6225, Novo Hamburgo/RS.", "R$ 49.990,00", "(51) 99999-1234", "ABC1D23"]) {
+      expect(out.filter((b) => b.includes(atomo))).toHaveLength(1); // inteiro, numa bolha só
+    }
+    // Nenhuma bolha termina no meio de uma frase de dados (só em . ! ? : ou na URL).
+    for (const b of out) expect(b).toMatch(/[.!?:]$|navigate=yes$/);
+  });
+});
+
 // Medido em produção (26/09/2026): com a instrução antiga ("Prefira várias
 // mensagens curtas a um texto único e longo"), o modelo chamava send_message
 // várias vezes no mesmo passo — chamadas paralelas, que chegam fora de ordem.
