@@ -64,6 +64,11 @@ export function splitIntoBubbles(text: string, maxChars: number): string[] {
  * primeira lia "R$ 10" como preço fechado de um produto de R$ 10.990.
  * Medido em produção (2026-09-04): a moto DT3 (R$ 10.990) anunciada
  * como "R$ 10" reais.
+ *
+ * A guarda de milhar era estreita (dígito-ponto-dígito) e deixava a URL de fora:
+ * "https://waze.com/ul?q=…" virava "https://waze." + "com/ul?" + "q=…", religadas
+ * com espaço espúrio ou mandadas em bolhas separadas. A regra agora é geral: fim
+ * de frase = pontuação seguida de espaço/fim.
  */
 function splitSentences(text: string): string[] {
   const out: string[] = [];
@@ -72,15 +77,12 @@ function splitSentences(text: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const end = m.index + m[0].length;
-    const prevChar = text[m.index - 1];
+    // Pontuação só encerra frase quando seguida de espaço ou do fim do texto.
+    // Isso cobre o separador de milhar/decimal ("10.990") e, de graça, tudo que
+    // carrega . ? ! por dentro sem espaço: URL ("waze.com/ul?q=a&b=1"), domínio,
+    // versão ("1.0"), e-mail. Um "?" de query string nunca é fim de frase.
     const nextChar = text[end];
-    const isNumeroPartido =
-      m[0] === "." &&
-      prevChar !== undefined &&
-      nextChar !== undefined &&
-      /\d/.test(prevChar) &&
-      /\d/.test(nextChar);
-    if (isNumeroPartido) continue;
+    if (nextChar !== undefined && !/\s/.test(nextChar)) continue;
     out.push(text.slice(start, end).trim());
     start = end;
   }
