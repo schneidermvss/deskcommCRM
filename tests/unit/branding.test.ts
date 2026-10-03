@@ -804,6 +804,10 @@ type CategoriaDeHost =
 type EntradaDeHost = { categoria: CategoriaDeHost; motivo: string };
 
 const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
+  "fipe.parallelum.com.br": {
+    categoria: "FORNECEDOR",
+    motivo: "endpoint da API pública da Tabela FIPE (Parallelum), consultado por `crm_lookup_fipe_price` para devolver o preço de referência de um veículo. O destino pertence ao fornecedor e não à instalação; sem chave obrigatória (FIPE_API_TOKEN opcional só sobe o teto diário).",
+  },
   "datamanager.googleapis.com": {
     categoria: "FORNECEDOR",
     motivo: "endpoint oficial da Google Data Manager API: recebe conversões e consulta o processamento na conta autorizada pela própria organização. O destino pertence ao fornecedor e não à instalação do CRM.",
