@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { coresDaBarraDoNavegador } from "@/lib/branding/barra-do-navegador";
 import { MarcaDaInstalacaoProvider } from "@/lib/branding/contexto";
 import { cssDaMarca } from "@/lib/branding/css";
+import { iconeDaAba } from "@/lib/branding/icone";
 import {
   marcaDaInstalacao,
   motivoDoFallback,
@@ -25,11 +26,19 @@ import { Providers } from "./providers";
 import { PublicEnvScript } from "./public-env-script";
 import "./globals.css";
 
+// Cliente usa Inter + JetBrains Mono (não as fontes de fábrica do produto,
+// Atkinson Hyperlegible + IBM Plex Mono) — troca deliberada de branding, ver
+// histórico do commit "Client customizations". Segue via next/font/google
+// (não vendorizada como as de fábrica): se o build começar a falhar por falta
+// de rede até o Google, vendorizar estas duas em app/fonts/ igual às outras.
+// O NOME da variável CSS continua "--font-atkinson" de propósito — é o nome
+// que `app/globals.css` e `tests/unit/tailwind-tokens.test.ts` esperam; só o
+// valor (a fonte carregada) mudou.
 const atkinson = Inter({
   subsets: ["latin", "latin-ext"],
   weight: ["400", "700"],
   display: "swap",
-  variable: "--font-sans",
+  variable: "--font-atkinson",
 });
 
 const plexMono = JetBrains_Mono({
@@ -56,10 +65,7 @@ async function marcaResolvida(): Promise<{
   readonly marca: MarcaResolvida;
 }> {
   const linha = await marcaDaInstalacao();
-  const marca = resolverMarca(
-    [camadaDaInstalacao(linha), camadaDoAmbiente(env)],
-    REGUA_DO_PRODUTO,
-  );
+  const marca = resolverMarca([camadaDaInstalacao(linha), camadaDoAmbiente(env)], REGUA_DO_PRODUTO);
   return { linha, marca };
 }
 
@@ -78,7 +84,7 @@ async function marcaResolvida(): Promise<{
  * motivo medido.
  */
 export async function generateMetadata(): Promise<Metadata> {
-  const { marca } = await marcaResolvida();
+  const { linha, marca } = await marcaResolvida();
   const { name } = marca;
   return {
     title: {
@@ -89,14 +95,7 @@ export async function generateMetadata(): Promise<Metadata> {
       "Centralize o atendimento por WhatsApp num funil só. Agentes de IA resolvem o que dá pra resolver e passam para o time humano o que importa — com tudo registrado. Multi-tenant, LGPD-nativo, feito para operações brasileiras.",
     applicationName: name,
     authors: [{ name }],
-    keywords: [
-      "CRM",
-      "atendimento",
-      "WhatsApp",
-      "IA conversacional",
-      "LGPD",
-      "multi-tenant",
-    ],
+    keywords: ["CRM", "atendimento", "WhatsApp", "IA conversacional", "LGPD", "multi-tenant"],
     robots: { index: false, follow: false },
     // Sem esta linha o navegador pede `/favicon.ico`, que não existe: medido em
     // produção, o 404 é a `app/not-found.tsx` INTEIRA (19.435 bytes de HTML)
@@ -104,7 +103,9 @@ export async function generateMetadata(): Promise<Metadata> {
     // `/icon` faz o pedido ir para `app/icon.tsx`, que desenha a marca da
     // instalação em runtime — ver o cabeçalho daquele arquivo para por que ele
     // não pode ser um arquivo estático em `public/`.
-    icons: { icon: "/icon" },
+    // Com um ícone subido em `/admin/marca` (migration 0443), o link aponta para
+    // o arquivo no storage da instalação — ver `iconeDaAba`.
+    icons: { icon: iconeDaAba(linha?.favicon_path) },
   };
 }
 
@@ -263,16 +264,19 @@ async function MarcaDosClientComponents({ children }: { children: React.ReactNod
   // mandá-los engordaria o payload do RSC de TODA página com dado que ninguém lê.
   return (
     <MarcaDaInstalacaoProvider
-      marca={{ name: marca.name, logoUrl: marca.logoUrl, initial: marca.initial }}
+      marca={{
+        name: marca.name,
+        logoUrl: marca.logoUrl,
+        logoDarkUrl: marca.logoDarkUrl,
+        initial: marca.initial,
+      }}
     >
       {children}
     </MarcaDaInstalacaoProvider>
   );
 }
 
-export default function RootLayout({
-  children,
-}: Readonly<{ children: React.ReactNode }>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html
       lang="pt-BR"
@@ -293,12 +297,7 @@ export default function RootLayout({
           <MarcaDosClientComponents>
             <ThemeProvider>{children}</ThemeProvider>
           </MarcaDosClientComponents>
-          <Toaster
-            position="top-right"
-            richColors
-            closeButton
-            duration={4000}
-          />
+          <Toaster position="top-right" richColors closeButton duration={4000} />
         </Providers>
       </body>
     </html>

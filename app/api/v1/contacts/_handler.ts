@@ -1,5 +1,5 @@
 /**
- * Core handlers para /api/v1/contacts (lista + get + create + patch).
+ * Core handlers para /api/v1/contacts (lista + get + create + patch + delete).
  *
  * Reusados pelo Route Handler REST e por MCP tools (S-13.03/04).
  * - Recebem actor polimórfico (`user` | `ai_agent`).
@@ -8,11 +8,19 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { createAdminClient } from "@/lib/supabase/admin";
+import { observeServiceOrigin } from "@/lib/atendimento/origem";
 import { ApiError } from "@/lib/api/types";
 import type { Actor, HandlerCtx } from "@/lib/api/handlers/types";
 import { audit } from "@/lib/audit";
+import { traduzir } from "@/lib/i18n/dicionario";
+import type { Idioma } from "@/lib/i18n/idiomas";
+import { roleAtLeast } from "@/lib/auth/types";
+import { canonicalPhoneBR, phoneLookupVariants } from "@/lib/channels/phone-variants";
+import { encontrarContatoPorTelefone } from "@/lib/channels/contato-por-telefone";
 import { hashCpf, encryptCpfSql } from "@/lib/contacts/cpf";
 import type { Contact } from "@/lib/types/contacts";
+import { ensureConversation, sessaoProntaParaEnvio } from "@/lib/automation/start-conversation";
 import type {
   ContactCreate,
   ContactPatch,
@@ -20,18 +28,13 @@ import type {
   ContactListQueryParams,
 } from "@/lib/schemas";
 import { contactListQuerySchema } from "@/lib/schemas";
+import { arrayDeUmValorParaOr } from "@/lib/inbox/marcador-da-conversa";
+import { buscaValeConsulta, normalizarTermoDeBusca } from "@/lib/inbox/termo-de-busca";
 
 type SB = SupabaseClient;
 
 const SELECT_COLS =
-  "id, organization_id, name, display_name, email, email_normalized, phone_number, cpf_hash, birthdate, is_blocked, blocked_reason, is_anonymized, anonymized_at, is_merged_into, merged_at, consent, tags, source, source_metadata, created_at, updated_at, last_activity_at";
-
-const ROLE_RANK: Record<string, number> = {
-  viewer: 1,
-  agent: 2,
-  manager: 3,
-  admin: 4,
-};
+  "id, organization_id, name, display_name, email, email_normalized, phone_number, cpf_hash, birthdate, is_blocked, blocked_reason, is_anonymized, anonymized_at, is_merged_into, merged_at, consent, tags, source, source_metadata, custom_fields, created_at, updated_at, last_activity_at, first_service_at";
 
 interface CursorPayload {
   sort: string | null;
@@ -92,6 +95,30 @@ export async function listContactsHandler(
   raw: ContactListQueryParams,
 ): Promise<ListContactsResult> {
   const q: ContactListQuery = contactListQuerySchema.parse(raw);
+
+  // ─── O PISO DA BUSCA (#1835) ───────────────────────────────────────────────
+  //
+  // `?search=a` montava `name.ilike.%a%` e devolvia a LISTA INTEIRA — e lista
+  // inteira sob busca não é resposta, é ruído que PARECE resposta. É a MESMA
+  // medição que criou `PISO_DA_BUSCA` no inbox, aqui pela porta que hoje não a
+  // tinha (a de conversas recusa no schema Zod; a de contatos deixava passar).
+  //
+  // A régua é consultada DENTRO do handler, e não no schema, de propósito: a
+  // tela de contatos manda o termo como foi digitado (`useContactList` não tem
+  // guarda de piso), então um `422` acenderia `showApiError` a cada letra
+  // digitada; e o MCP (`crm_search_contacts`) chama este handler direto e
+  // receberia um `ZodError` no meio da ferramenta. O efeito pedido é o mesmo
+  // dos dois lados: abaixo do piso a busca NÃO VAI AO BANCO, e quem digita vê
+  // a lista vazia até completar os dois caracteres.
+  //
+  // O piso mede o MESMO termo que vai ao filtro: sem os parênteses (ver o
+  // bloco do `.or()` abaixo). Medir o cru deixava `"()"` consultar `%%` e
+  // `"(a"` consultar `%a%` — a lista inteira de volta pela porta do parêntese.
+  const termoDeTexto = q.search ? q.search.replace(/[()]/g, " ") : undefined;
+  if (termoDeTexto !== undefined && !buscaValeConsulta(termoDeTexto)) {
+    return { contacts: [], cursor: null, has_more: false };
+  }
+
   const sortCol = q.order_by;
   const asc = q.order_dir === "asc";
 
@@ -99,25 +126,67 @@ export async function listContactsHandler(
     .from("contacts")
     .select(SELECT_COLS)
     .eq("organization_id", ctx.organization_id)
+    // O placeholder de GRUPO (`kind='whatsapp_group'`) não é uma pessoa da
+    // base: é o registro técnico que a conversa do grupo pendura para caber no
+    // mesmo esquema de `contacts`. Listar junto misturaria grupo com cliente
+    // numa lista que existe para achar CLIENTE — mesmo raciocínio da lápide de
+    // fusão logo abaixo.
+    .eq("kind", "person")
+    // A LÁPIDE DE FUSÃO NÃO É UM CONTATO VIVO.
+    //
+    // `is_merged_into` marca o cadastro que foi absorvido por outro. Ele não é
+    // apagado de propósito (é o que libera telefone e e-mail para o vencedor
+    // herdar, e é o registro da fusão), mas ele deixou de ser uma pessoa da
+    // base — e o resto do produto já o trata assim: `contacts/duplicates`, o
+    // webhook de captação (`webhooks/in/[token]`) e as duas leituras de
+    // `lib/channels/contato-por-telefone` filtram `is_merged_into is null`.
+    // Esta listagem era a ÚNICA que não filtrava.
+    //
+    // Sem esta linha, a fusão parece não ter acontecido: medido pela tela em
+    // 2026-09-04, logo depois de juntar dois cadastros a lista seguia mostrando
+    // OS DOIS, com o mesmo telefone e ambos com status "ativo" — e quem opera
+    // ou tenta juntar de novo (o diálogo de duplicados já não os oferece) ou
+    // conclui que o recurso não funciona. Antes de a fusão existir na tela, a
+    // coluna só era escrita por uma data migration de mão única, e por isso
+    // ninguém tinha esbarrado nisto.
+    .is("is_merged_into", null)
     .order(sortCol, { ascending: asc, nullsFirst: false })
     .order("id", { ascending: asc })
     .limit(q.limit + 1);
 
-  if (q.search) {
-    // ⚠️ `%` e `_` são curingas do LIKE, e `,`/`(`/`)` são delimitadores do DSL
-    // do `.or()` — um nome com vírgula ("Silva, Maria") injetaria uma condição
-    // extra na string do filtro. Mesmo escape de conversations/_handler.ts.
-    const s = q.search.trim().replace(/[%_]/g, (m) => `\\${m}`).replace(/[,()]/g, " ");
+  if (q.search && termoDeTexto !== undefined) {
+    // ─── Duas normalizações, em ordem, com responsabilidades diferentes ─────
+    // É a MESMA composição da busca de conversas
+    // (`conversations/_handler.ts:297`, `termoSeguroParaOr(normalizarTermoDeBusca(...))`):
+    //
+    //   normalizarTermoDeBusca → como a PESSOA digitou: espaço duplo, vírgula e
+    //                            ponto e vírgula colapsam num curinga só, então
+    //                            "Paulo  Lima" e "Paulo Jr" achem o "Paulo Lima Jr"
+    //                            e "Silva, Maria" não exige mais adjacência
+    //   saneamento de `%`/`_`  → gramática do LIKE: curinga digitado é literal
+    //
+    // Os PARÊNTESES saem ANTES da régua: são delimitador do DSL do `.or()` do
+    // PostgREST (um "(" sem fechar derrubaria o filtro inteiro com HTTP 400) e
+    // a normalização não os conhece — tirá-los depois deixaria `Paulo* Jr` com
+    // espaço solto, que não casa nada. Mesmo escape de sempre, mesmo defeito de
+    // sempre: um nome com vírgula injetaria condição extra no `.or()`.
+    const s = normalizarTermoDeBusca(termoDeTexto).replace(/[%_]/g, (m) => `\\${m}`);
     const digits = q.search.replace(/\D/g, "");
     const orParts = [
       `name.ilike.%${s}%`,
       // ⚠️ `display_name` ESTAVA DE FORA, e é a coluna que a tela MOSTRA.
       //
       // Contato que entra pelo WhatsApp nasce só com `display_name` (o pushName);
-      // `name` fica nulo até alguém editar à mão. `resolveContactName` e o resto
-      // da UI preferem `display_name` — então a busca ignorava exatamente o nome
-      // que o usuário vê e digita. Medido nesta instalação: 15 de 33 contatos
-      // têm `display_name` e nenhum `name`.
+      // `name` fica nulo até alguém editar à mão, e a busca ignorava exatamente
+      // o nome que o usuário vê e digita. Medido nesta instalação: 15 de 33
+      // contatos têm `display_name` e nenhum `name`.
+      //
+      // Quem decide o nome exibido é `nomeDoContato`/`rotuloDoContato`
+      // (lib/contacts/rotulo-do-contato.ts) — a ordem em vigor se lê ali, não
+      // aqui. Esta linha já afirmou que a UI prefere `display_name`, e a issue
+      // #906 inverteu a precedência sem que a frase acompanhasse. O que
+      // justifica a coluna no OR não é a ordem: é que ela é a ÚNICA preenchida
+      // em metade da base, então buscar sem ela devolve zero para quem existe.
       //
       // Achado por um turno de agente REAL (IA 360 · wave 2): pedido para marcar
       // um retorno para "Cliente Retorno E2E", o modelo chamou esta busca, levou
@@ -127,18 +196,51 @@ export async function listContactsHandler(
       `email.ilike.%${s}%`,
       `phone_number.ilike.%${s}%`,
     ];
+    if (digits.length >= 8) {
+      // 10/11 dígitos sem DDI: no Brasil é DDD+local. Sem o 55, `3284793302`
+      // não gera a variante com o 9 e o cadastro `+5532984793302` some da busca.
+      const base =
+        !digits.startsWith("55") && (digits.length === 10 || digits.length === 11)
+          ? `55${digits}`
+          : digits;
+      for (const v of phoneLookupVariants(base)) {
+        const d = v.replace(/\D/g, "");
+        if (d && d !== digits) orParts.push(`phone_number.ilike.%${d}%`);
+      }
+    }
     if (digits.length === 11) {
       orParts.push(`cpf_hash.eq.${hashCpf(digits)}`);
     }
     query = query.or(orParts.join(","));
   }
-  if (q.tag) query = query.contains("tags", [q.tag]);
+  // ⚠️ E/OU (#1274). E e OU viraram DOIS textos, e o que os separa e o
+  // operador — a mesma régua do Inbox (`lib/inbox/marcador-da-conversa.ts`), com
+  // a diferença de que aqui existe UMA caixa só (`contacts.tags`).
+  //
+  // - E: `tags=cs.{a,b}` — `contains` com a LISTA, que o builder já sabe escrever.
+  //   Uma etiqueta só continua `tags=cs.{a}`, byte a byte o que era antes.
+  // - OU: um `or=` com um `ov` por etiqueta. ⚠️ NÃO é `overlaps` repetido: o
+  //   builder escreve `tags=ov.…` no MESMO parametro cada vez, e parâmetro
+  //   repetido no PostgREST é E — que é o modo oposto com o nome de OU.
+  if (q.tag && q.tag.length > 1 && q.modo === "ou") {
+    query = query.or(
+      q.tag.map((marcador) => `tags.ov.${arrayDeUmValorParaOr(marcador)}`).join(","),
+    );
+  } else if (q.tag) {
+    query = query.contains("tags", q.tag);
+  }
   if (q.source) query = query.eq("source", q.source);
 
   if (q.cursor) {
     const c = decodeCursor(q.cursor);
     if (!c) {
-      throw new ApiError(400, "invalid_cursor", undefined, ctx.requestId, "Cursor inválido.");
+      throw new ApiError(
+        400,
+        "invalid_cursor",
+        undefined,
+        ctx.requestId,
+        traduzir("Cursor inválido.", ctx.idioma ?? "pt-BR"),
+      );
     }
     const op = asc ? "gt" : "lt";
     if (c.sort) {
@@ -254,7 +356,13 @@ export async function getContactHandler(
     throw new ApiError(500, "internal_error", undefined, ctx.requestId, error.message);
   }
   if (!data) {
-    throw new ApiError(404, "not_found", undefined, ctx.requestId, "Contato não encontrado.");
+    throw new ApiError(
+      404,
+      "not_found",
+      undefined,
+      ctx.requestId,
+      traduzir("Contato não encontrado.", ctx.idioma ?? "pt-BR"),
+    );
   }
   const contact = data as Contact;
 
@@ -271,8 +379,7 @@ export async function getContactHandler(
       .maybeSingle();
 
     const role = membership?.role as string | undefined;
-    const rank = role ? (ROLE_RANK[role] ?? 0) : 0;
-    if (rank < ROLE_RANK.manager!) {
+    if (!roleAtLeast(role, "manager")) {
       cpfDecryptDenied = true;
     } else {
       const { data: dec, error: decErr } = await supabase.rpc("decrypt_cpf", {
@@ -337,11 +444,12 @@ export async function createContactHandler(
     name: input.name ?? null,
     display_name: input.display_name ?? null,
     email: input.email ?? null,
-    phone_number: input.phone_number ?? null,
+    phone_number: input.phone_number ? canonicalPhoneBR(input.phone_number) : null,
     birthdate: input.birthdate ?? null,
     tags: input.tags ?? [],
     source: input.source,
     source_metadata: input.source_metadata ?? {},
+    custom_fields: input.custom_fields ?? {},
     consent: input.consent ?? {},
   };
 
@@ -358,10 +466,44 @@ export async function createContactHandler(
     .single();
 
   if (insErr) {
+    // 409 quando o telefone já é de um contato vivo desta organização: o índice
+    // parcial `uniq_contacts_org_phone` (organization_id, phone_number) barra o
+    // insert com 23505. E-mail e CPF também têm trava única na tabela, então o
+    // 23505 sozinho não diz qual índice bateu: só vira `contact_exists` se a
+    // releitura do telefone achar um contato vivo. A releitura repete o filtro
+    // por `organization_id` — o id devolvido no `details` nunca vem do corpo da
+    // requisição — e qualquer outro conflito continua no 500 de sempre.
+    const telefoneDoInsert = insertRow.phone_number as string | null;
+    if (insErr.code === "23505" && telefoneDoInsert) {
+      const existente = await encontrarContatoPorTelefone(
+        supabase,
+        ctx.organization_id,
+        telefoneDoInsert,
+      );
+      if (existente) {
+        throw new ApiError(
+          409,
+          "contact_exists",
+          { contact_id: existente.id },
+          ctx.requestId,
+          traduzir("Já existe um contato com este telefone.", ctx.idioma ?? "pt-BR"),
+        );
+      }
+    }
     throw new ApiError(500, "internal_error", undefined, ctx.requestId, insErr.message);
   }
 
   const contact = created as Contact;
+  if (contact.phone_number) {
+    try {
+      const sessionId = await sessaoProntaParaEnvio(supabase, ctx.organization_id);
+      if (sessionId) {
+        await ensureConversation(supabase, ctx.organization_id, contact.id, sessionId);
+      }
+    } catch {
+      // conversa no create é best-effort; o contato já existe
+    }
+  }
 
   await supabase
     .rpc("emit_event", {
@@ -413,7 +555,10 @@ export async function patchContactHandler(
     // e-mail foi substituído não tinha onde olhar. `consent` vem junto porque o
     // patch dele passou a ser MERGE (ver abaixo), e merge precisa do estado
     // anterior.
-    .select("id, organization_id, is_anonymized, tags, email, phone_number, name, display_name, consent")
+    .select(
+      "id, organization_id, is_anonymized, tags, email, phone_number, name, display_name, consent, custom_fields",
+    )
+    .eq("organization_id", ctx.organization_id)
     .eq("id", contactId)
     .maybeSingle();
 
@@ -421,7 +566,13 @@ export async function patchContactHandler(
     throw new ApiError(500, "internal_error", undefined, ctx.requestId, selErr.message);
   }
   if (!existing) {
-    throw new ApiError(404, "not_found", undefined, ctx.requestId, "Contato não encontrado.");
+    throw new ApiError(
+      404,
+      "not_found",
+      undefined,
+      ctx.requestId,
+      traduzir("Contato não encontrado.", ctx.idioma ?? "pt-BR"),
+    );
   }
   if (existing.is_anonymized) {
     throw new ApiError(
@@ -429,7 +580,7 @@ export async function patchContactHandler(
       "lgpd_anonymization_irreversible",
       undefined,
       ctx.requestId,
-      "Contato anonimizado — edição bloqueada (LGPD).",
+      traduzir("Contato anonimizado — edição bloqueada (LGPD).", ctx.idioma ?? "pt-BR"),
     );
   }
 
@@ -444,11 +595,18 @@ export async function patchContactHandler(
   //
   // O banco deriva a coluna sozinho — era só não escrever nela.
   if (input.email !== undefined) patch.email = input.email;
-  if (input.phone_number !== undefined) patch.phone_number = input.phone_number;
+  if (input.phone_number !== undefined) {
+    patch.phone_number = input.phone_number ? canonicalPhoneBR(input.phone_number) : input.phone_number;
+  }
   if (input.birthdate !== undefined) patch.birthdate = input.birthdate;
   if (input.tags !== undefined) patch.tags = input.tags;
   if (input.source !== undefined) patch.source = input.source;
   if (input.source_metadata !== undefined) patch.source_metadata = input.source_metadata;
+  // SUBSTITUIÇÃO, não merge — ao contrário de `consent`. O editor da tela manda
+  // o objeto inteiro que ele renderizou a partir do schema do funil; um merge
+  // aqui tornaria IMPOSSÍVEL apagar um campo pela tela, porque a chave removida
+  // voltaria do estado anterior a cada gravação.
+  if (input.custom_fields !== undefined) patch.custom_fields = input.custom_fields;
   if (input.consent !== undefined) {
     // MERGE por finalidade, nunca substituição.
     //
@@ -478,15 +636,19 @@ export async function patchContactHandler(
       "invalid_request",
       undefined,
       ctx.requestId,
-      "Nenhum campo para atualizar.",
+      traduzir("Nenhum campo para atualizar.", ctx.idioma ?? "pt-BR"),
     );
   }
 
+  const tagServiceOrigin = input.tags !== undefined
+    ? await observeServiceOrigin(createAdminClient(), ctx.organization_id, contactId)
+    : null;
   patch.updated_at = new Date().toISOString();
 
   const { data: updated, error: updErr } = await supabase
     .from("contacts")
     .update(patch)
+    .eq("organization_id", ctx.organization_id)
     .eq("id", contactId)
     .select(SELECT_COLS)
     .maybeSingle();
@@ -500,7 +662,7 @@ export async function patchContactHandler(
       "not_found",
       undefined,
       ctx.requestId,
-      "Contato não encontrado após update.",
+      traduzir("Contato não encontrado após update.", ctx.idioma ?? "pt-BR"),
     );
   }
 
@@ -550,12 +712,12 @@ export async function patchContactHandler(
     const prevTags: string[] = (existing as { tags?: string[] }).tags ?? [];
     const addedTags = input.tags.filter((t) => !prevTags.includes(t));
     if (addedTags.length) {
-      await supabase
+      await createAdminClient()
         .rpc("emit_event", {
           p_event_type: "contact.tag_added",
           p_entity_kind: "contact",
           p_entity_id: contact.id,
-          p_payload: { added_tags: addedTags, tags: input.tags },
+          p_payload: { added_tags: addedTags, tags: input.tags, service_origin: tagServiceOrigin },
           p_metadata: { request_id: ctx.requestId, ...a.metadataActor },
           p_organization_id: contact.organization_id,
         })
@@ -576,4 +738,208 @@ export async function patchContactHandler(
   });
 
   return contact;
+}
+
+// ---------------------------------------------------------------------------
+// delete
+// ---------------------------------------------------------------------------
+
+function throwOnDbError(
+  err: { code?: string; message: string } | null,
+  requestId: string,
+  idioma: Idioma = "pt-BR",
+): void {
+  if (!err) return;
+  // conversations/messages apontam para contacts com ON DELETE RESTRICT.
+  if (err.code === "23503") {
+    throw new ApiError(
+      409,
+      "state_conflict",
+      undefined,
+      requestId,
+      traduzir("Não foi possível excluir: o contato ainda tem registros vinculados.", idioma),
+    );
+  }
+  throw new ApiError(500, "internal_error", undefined, requestId, err.message);
+}
+
+/**
+ * Os vínculos `on delete restrict` que apontam para `contacts` e que este
+ * handler NÃO apaga de propósito.
+ *
+ * Medido em `supabase/baseline.sql` (não inferido): além de
+ * `conversations.contact_id` (linha 3531) e `messages.contact_id` (3781) — o
+ * histórico, que sai logo abaixo porque é o pedido da exclusão —, a única FK
+ * RESTRICT que sobra é `calendar_appointments.contact_id` (linha 15226, da
+ * migração 0177). Ela é da agenda, e a decisão da 0177 foi explícita: o
+ * compromisso aconteceu, tem dono e tem texto livre, então ele não cai por
+ * cascata junto com a ficha.
+ *
+ * Conferir esta lista ANTES do primeiro DELETE é o arranjo que a issue #752
+ * pede: sem ele, apagar `messages`/`conversations` e só então esbarrar no
+ * RESTRICT é destruir o histórico do lead para devolver 409 — o pior dos dois
+ * desfechos, porque a ficha continua lá e as mensagens não.
+ *
+ * Tabela nova com RESTRICT para `contacts` entra aqui como uma linha, e o
+ * teste que acompanha este handler (`tests/unit/contato-delete.test.ts`)
+ * exercita a contagem com filtro de organização.
+ */
+const VINCULOS_RESTRICT_NAO_APAGADOS: ReadonlyArray<{ tabela: string; rotulo: string }> = [
+  { tabela: "calendar_appointments", rotulo: "compromisso(s) na agenda" },
+];
+
+export async function deleteContactHandler(
+  supabase: SB,
+  ctx: HandlerCtx,
+  contactId: string,
+): Promise<{ id: string }> {
+  const { data: existing, error: selErr } = await supabase
+    .from("contacts")
+    .select("id, organization_id")
+    .eq("id", contactId)
+    .eq("organization_id", ctx.organization_id)
+    .maybeSingle();
+
+  if (selErr) {
+    throw new ApiError(500, "internal_error", undefined, ctx.requestId, selErr.message);
+  }
+  if (!existing) {
+    throw new ApiError(
+      404,
+      "not_found",
+      undefined,
+      ctx.requestId,
+      traduzir("Contato não encontrado.", ctx.idioma ?? "pt-BR"),
+    );
+  }
+
+  const a = actorAuditPayload(ctx.actor);
+
+  // Pré-checagem dos vínculos que barram o DELETE da ficha (issue #752).
+  //
+  // Só CONTA: quem recusa continua sendo o banco, com o 23503 do RESTRICT. A
+  // contagem existe para saber disso antes de apagar o histórico, e é por isso
+  // que ela vem antes da chamada que apaga — depois não há mais como desfazer.
+  const vinculos: string[] = [];
+  // A contagem crua por tabela é o que a tela traduz e pluraliza; `vinculos`
+  // (texto em pt-BR) segue igual ao da auditoria.
+  const por_tabela: Record<string, number> = {};
+  for (const vinculo of VINCULOS_RESTRICT_NAO_APAGADOS) {
+    const { count, error } = await supabase
+      .from(vinculo.tabela)
+      .select("id", { count: "exact", head: true })
+      .eq("contact_id", contactId)
+      .eq("organization_id", ctx.organization_id);
+    if (error) {
+      // Falha da CONTAGEM não autoriza seguir apagando: seguir aqui é cair no
+      // defeito que esta pré-checagem existe para impedir (histórico
+      // destruído antes de saber se a ficha sai). Um 500 agora é reversível;
+      // mensagem apagada não volta.
+      throw new ApiError(500, "internal_error", undefined, ctx.requestId, error.message);
+    }
+    if ((count ?? 0) > 0) {
+      vinculos.push(`${count} ${vinculo.rotulo}`);
+      por_tabela[vinculo.tabela] = count ?? 0;
+    }
+  }
+
+  if (vinculos.length > 0) {
+    // O 409 é o MESMO do caminho de FK (mesma causa, mesmo tratamento no
+    // cliente), mas aqui ele chega com `messages`/`conversations` intactos.
+    // O detalhe que o cliente não vê está na auditoria: `vinculos` diz o que
+    // barrou, `apagados` vazio diz que nada foi tocado.
+    await audit({
+      action: "contact.delete_blocked",
+      actorUserId: a.actorUserId,
+      organizationId: ctx.organization_id,
+      resourceType: "contact",
+      resourceId: contactId,
+      requestId: ctx.requestId,
+      metadata: { ...a.metadataActor, motivo: "vinculo_restrict", vinculos, apagados: [] },
+    });
+    throw new ApiError(
+      409,
+      "state_conflict",
+      { vinculos, por_tabela },
+      ctx.requestId,
+      traduzir("Não foi possível excluir: o contato ainda tem registros vinculados.", ctx.idioma ?? "pt-BR"),
+    );
+  }
+
+  // UMA função, UMA transação (issue #1862).
+  //
+  // Antes eram três DELETE separados: `messages`, depois `conversations`, depois
+  // `contacts`. Quando a última chamada era recusada (o gatilho de follow-up
+  // devolvia 42501 em quem tem `auth.uid()`), as duas primeiras já estavam
+  // gravadas — a ficha ficava na base SEM histórico, e a auditoria do erro saía
+  // com `apagados: ["messages","conversations"]` como rastro do estrago.
+  //
+  // Agora a rota chama `fn_apagar_contato_com_historico` (migration 0488), que
+  // apaga as três na ordem certa do RESTRICT dentro de uma transação só: ou sai
+  // tudo, ou não sai nada. É `security invoker` — a RLS de quem chama continua
+  // valendo, e o filtro de `organization_id` é do banco (argumento + where), não
+  // do chamador. Nenhum service role entra aqui.
+  let apagou = false;
+  try {
+    const { data, error: rpcErr } = await supabase.rpc("fn_apagar_contato_com_historico", {
+      p_contact_id: contactId,
+      p_organization_id: ctx.organization_id,
+    });
+    throwOnDbError(rpcErr, ctx.requestId, ctx.idioma);
+    apagou = data === true;
+  } catch (err) {
+    // `audit()` é best-effort por doutrina (engole a própria falha e reporta),
+    // então registrar aqui não pode trocar o desfecho do erro real.
+    //
+    // `apagados` fica VAZIO de propósito: numa transação só não existe "chegou
+    // até a metade". Ou a ficha saiu com o histórico (aqui seria outro desfecho),
+    // ou a transação desfez tudo — e é isso que a linha de auditoria diz.
+    await audit({
+      action: "contact.delete_blocked",
+      actorUserId: a.actorUserId,
+      organizationId: ctx.organization_id,
+      resourceType: "contact",
+      resourceId: contactId,
+      requestId: ctx.requestId,
+      metadata: { ...a.metadataActor, motivo: "falha_ao_apagar", vinculos: [], apagados: [] },
+    });
+    throw err;
+  }
+
+  if (!apagou) {
+    // A ficha existia na pré-checagem e sumiu antes da chamada (outra sessão a
+    // apagou, ou a RLS não a deixou ver): o mesmo 404 de sempre.
+    throw new ApiError(
+      404,
+      "not_found",
+      undefined,
+      ctx.requestId,
+      traduzir("Contato não encontrado.", ctx.idioma ?? "pt-BR"),
+    );
+  }
+
+  await supabase
+    .rpc("emit_event", {
+      p_event_type: "contact.deleted",
+      p_entity_kind: "contact",
+      p_entity_id: contactId,
+      p_payload: {},
+      p_metadata: { request_id: ctx.requestId, ...a.metadataActor },
+      p_organization_id: ctx.organization_id,
+    })
+    .then(({ error }) => {
+      if (error) console.error("[contacts.delete] emit_event failed", error.message);
+    });
+
+  await audit({
+    action: "contact.deleted",
+    actorUserId: a.actorUserId,
+    organizationId: ctx.organization_id,
+    resourceType: "contact",
+    resourceId: contactId,
+    requestId: ctx.requestId,
+    metadata: a.metadataActor,
+  });
+
+  return { id: contactId };
 }

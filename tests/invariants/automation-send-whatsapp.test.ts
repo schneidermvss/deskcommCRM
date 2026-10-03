@@ -44,7 +44,10 @@ function sqlLiteral(v: unknown): string {
 }
 
 type QResult = { data: unknown; error: { message: string; code?: string } | null };
-type RowResult = { data: Record<string, unknown> | null; error: { message: string; code?: string } | null };
+type RowResult = {
+  data: Record<string, unknown> | null;
+  error: { message: string; code?: string } | null;
+};
 
 type FilterOp = "eq" | "in";
 interface Filter {
@@ -130,7 +133,8 @@ class FakeQuery implements PromiseLike<QResult> {
     const { data, error } = await this.execute();
     if (error) return { data: null, error };
     const rows = (data as Array<Record<string, unknown>>) ?? [];
-    if (rows.length !== 1) return { data: null, error: { message: `expected 1 row, got ${rows.length}` } };
+    if (rows.length !== 1)
+      return { data: null, error: { message: `expected 1 row, got ${rows.length}` } };
     return { data: rows[0]!, error: null };
   }
 
@@ -155,7 +159,10 @@ class FakeQuery implements PromiseLike<QResult> {
 
   /** Split top-level da lista de colunas (respeitando parênteses) — distingue coluna
    *  plana de embed PostgREST-style `alias:fk_col(col1, col2, ...)`. */
-  private parseCols(): { plain: string[]; embeds: Array<{ alias: string; fk: string; cols: string[] }> } {
+  private parseCols(): {
+    plain: string[];
+    embeds: Array<{ alias: string; fk: string; cols: string[] }>;
+  } {
     const plain: string[] = [];
     const embeds: Array<{ alias: string; fk: string; cols: string[] }> = [];
     const parts: string[] = [];
@@ -263,6 +270,27 @@ function fakeAdminClient(): SupabaseClient {
     from: (table: string) => new FakeQuery(table),
     rpc: (name: string, params: Record<string, unknown>): Promise<QResult> => {
       return (async () => {
+        if (name === "fn_service_boundary" || name === "fn_service_event_origin") {
+          try {
+            const expression =
+              name === "fn_service_boundary"
+                ? `public.fn_service_boundary(${sqlLiteral(params.p_org)}::uuid,${sqlLiteral(params.p_conversation)}::uuid)`
+                : `public.fn_service_event_origin(${sqlLiteral(params.p_org)}::uuid,${sqlLiteral(params.p_event)}::uuid,${sqlLiteral(params.p_contact)}::uuid,${sqlLiteral(params.p_session)}::uuid)`;
+            return { data: JSON.parse(sql(`select ${expression};`)), error: null };
+          } catch (error) {
+            return { data: null, error: { message: String(error) } };
+          }
+        }
+        if (name === "fn_service_begin") {
+          try {
+            const out = sql(
+              `select public.fn_service_begin(p_org => ${sqlLiteral(params.p_org)}::uuid, p_contact => ${sqlLiteral(params.p_contact)}::uuid, p_session => ${sqlLiteral(params.p_session)}::uuid);`,
+            );
+            return { data: JSON.parse(out), error: null };
+          } catch (error) {
+            return { data: null, error: { message: String(error) } };
+          }
+        }
         if (name !== "emit_event") throw new Error(`fakeAdminClient: unsupported rpc ${name}`);
         const p = params as unknown as EmitEventParams;
         try {
@@ -321,8 +349,13 @@ function baseCtx(overrides: Partial<ActionCtx> = {}): ActionCtx {
     admin,
     organizationId: GOV_ORG,
     ruleId: RULE_ID,
-  ruleName: "Automação de teste",
-    event: { id: lastLine(sql(`select gen_random_uuid();`)) } as unknown as EventRow,
+    ruleName: "Automação de teste",
+    event: {
+      id: lastLine(
+        sql(`select public.emit_event('contact.tag_added','contact','${CONTACT_ID}',
+      jsonb_build_object('service_origin',jsonb_build_object('kind','command','observed',public.fn_service_observe_command('${GOV_ORG}','${CONTACT_ID}'))),'{}','${GOV_ORG}');`),
+      ),
+    } as unknown as EventRow,
     context: {},
     requestId: "test-request-id",
     ...overrides,
@@ -347,7 +380,9 @@ describe("send_whatsapp_message — execute (Task 11)", () => {
     vi.setSystemTime(new Date("2026-07-17T10:00:00"));
     const executor = getAction("send_whatsapp_message")!;
     const ctx = baseCtx({
-      context: { contact: { id: CONTACT_ID, is_blocked: false, phone_number: "+5511999990001", name: "Ana" } },
+      context: {
+        contact: { id: CONTACT_ID, is_blocked: false, phone_number: "+5511999990001", name: "Ana" },
+      },
     });
     const result = await executor.execute(ctx, {
       channel_session_id: SESSION_ID,
@@ -375,7 +410,9 @@ describe("send_whatsapp_message — execute (Task 11)", () => {
     const messageId = String(result.detail?.message_id);
     expect(messageId).toBeTruthy();
 
-    const found = rows(`select body, direction, type, contact_id from public.messages where id = '${messageId}'`);
+    const found = rows(
+      `select body, direction, type, contact_id from public.messages where id = '${messageId}'`,
+    );
     expect(found.length).toBe(1);
     expect(found[0]!.body).toBe("Oi Ana");
     expect(found[0]!.direction).toBe("outbound");
@@ -462,10 +499,19 @@ describe("send_whatsapp_message — postponeUntil (Task 11)", () => {
 describe("send_whatsapp_message — contato bloqueado (Task 11)", () => {
   it("5. contato bloqueado: skipped, zero mensagens inseridas", async () => {
     vi.setSystemTime(new Date("2026-07-17T10:00:00"));
-    const before = rows(`select id from public.messages where contact_id = '${CONTACT_BLOCKED_ID}'`).length;
+    const before = rows(
+      `select id from public.messages where contact_id = '${CONTACT_BLOCKED_ID}'`,
+    ).length;
     const executor = getAction("send_whatsapp_message")!;
     const ctx = baseCtx({
-      context: { contact: { id: CONTACT_BLOCKED_ID, is_blocked: true, phone_number: "+5511999990002", name: "Bloqueado" } },
+      context: {
+        contact: {
+          id: CONTACT_BLOCKED_ID,
+          is_blocked: true,
+          phone_number: "+5511999990002",
+          name: "Bloqueado",
+        },
+      },
     });
     const result = await executor.execute(ctx, {
       channel_session_id: SESSION_ID,
@@ -474,7 +520,131 @@ describe("send_whatsapp_message — contato bloqueado (Task 11)", () => {
 
     expect(result.status).toBe("skipped");
     expect(result.detail?.reason).toBe("contact_blocked");
-    const after = rows(`select id from public.messages where contact_id = '${CONTACT_BLOCKED_ID}'`).length;
+    const after = rows(
+      `select id from public.messages where contact_id = '${CONTACT_BLOCKED_ID}'`,
+    ).length;
     expect(after).toBe(before);
+  });
+});
+
+/**
+ * Gate fixo de RECUSA de consentimento — código, não `conditions` declarativas.
+ *
+ * O que ele bloqueia é a recusa REGISTRADA (`consent.marketing.declined_at`,
+ * gravada pela ingestão do Respondi), e não a simples ausência de concessão.
+ * A razão está medida no cabeçalho de `lib/automation/guarda-do-contato.ts`: o
+ * DEFAULT da coluna `contacts.consent` já é `granted_at: null`, então todo
+ * contato do produto nasce indistinguível de uma recusa — e nenhuma tela deste
+ * produto concede consentimento. Um gate por ausência desligaria a automação de
+ * WhatsApp de toda instalação que não usa o formulário do Respondi.
+ */
+describe("send_whatsapp_message — gate de recusa de consentimento (achado 2026-08-25)", () => {
+  it("6. sem objeto consent (o contato nascido do default): PASSA do gate", async () => {
+    vi.setSystemTime(new Date("2026-07-17T10:00:00"));
+    const executor = getAction("send_whatsapp_message")!;
+    const ctx = baseCtx({
+      context: {
+        contact: { id: CONTACT_ID, is_blocked: false, phone_number: "+5511999990001", name: "Ana" },
+      },
+    });
+    const result = await executor.execute(ctx, {
+      channel_session_id: SESSION_ID,
+      template: "Oi {{contact.name}}",
+    });
+
+    // "Passa do gate" não é "entregou": este harness roda SEM WAHA de propósito
+    // (caso 2 acima), e todo envio termina `postponed`/`waha_not_configured`.
+    expect(result.status).not.toBe("skipped");
+    expect(result.status).toBe("postponed");
+    expect(result.detail?.reason).toBe("waha_not_configured");
+  });
+
+  it("6b. granted_at null explícito, SEM declined_at: PASSA — é o default da coluna", async () => {
+    vi.setSystemTime(new Date("2026-07-17T10:00:00"));
+    const executor = getAction("send_whatsapp_message")!;
+    const ctx = baseCtx({
+      context: {
+        contact: {
+          id: CONTACT_ID,
+          is_blocked: false,
+          phone_number: "+5511999990001",
+          name: "Ana",
+          consent: { marketing: { granted_at: null, source: null, version: null } },
+        },
+      },
+    });
+    const result = await executor.execute(ctx, {
+      channel_session_id: SESSION_ID,
+      template: "Oi {{contact.name}}",
+    });
+
+    expect(result.status).toBe("postponed");
+    expect(result.detail?.reason).toBe("waha_not_configured");
+  });
+
+  it("7. recusa registrada (declined_at): skipped consent_declined, zero mensagens", async () => {
+    vi.setSystemTime(new Date("2026-07-17T10:00:00"));
+    const before = rows(`select id from public.messages where contact_id = '${CONTACT_ID}'`).length;
+    const executor = getAction("send_whatsapp_message")!;
+    const ctx = baseCtx({
+      context: {
+        contact: {
+          id: CONTACT_ID,
+          is_blocked: false,
+          phone_number: "+5511999990001",
+          name: "Ana",
+          consent: {
+            marketing: {
+              granted_at: null,
+              declined_at: "2026-07-10T00:00:00Z",
+              source: "webhook:respondi",
+              version: null,
+            },
+          },
+        },
+      },
+    });
+    const result = await executor.execute(ctx, {
+      channel_session_id: SESSION_ID,
+      template: "Oi {{contact.name}}",
+    });
+
+    expect(result.status).toBe("skipped");
+    expect(result.detail?.reason).toBe("consent_declined");
+    const after = rows(`select id from public.messages where contact_id = '${CONTACT_ID}'`).length;
+    expect(after).toBe(before);
+  });
+
+  it("8. consentimento concedido: passa do gate", async () => {
+    vi.setSystemTime(new Date("2026-07-17T10:00:00"));
+    const executor = getAction("send_whatsapp_message")!;
+    const ctx = baseCtx({
+      context: {
+        contact: {
+          id: CONTACT_ID,
+          is_blocked: false,
+          phone_number: "+5511999990001",
+          name: "Ana",
+          consent: {
+            marketing: {
+              granted_at: "2026-08-01T00:00:00Z",
+              source: "webhook:respondi",
+              version: "9FiY9mrO",
+            },
+          },
+        },
+      },
+    });
+    const result = await executor.execute(ctx, {
+      channel_session_id: SESSION_ID,
+      template: "Oi {{contact.name}}",
+    });
+
+    // Este caso não prova entrega — prova só que o gate deixou passar. Escrito
+    // como `toBe("success")` antes de o arquivo ter rodado contra banco real:
+    // a asserção nunca foi exercitada e congelava um desfecho impossível neste
+    // harness.
+    expect(result.status).toBe("postponed");
+    expect(result.detail?.reason).toBe("waha_not_configured");
   });
 });

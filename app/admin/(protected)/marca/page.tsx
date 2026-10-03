@@ -2,9 +2,13 @@ import { notFound } from "next/navigation";
 
 import { loadAuthUser } from "@/lib/auth/server";
 import { marcaDaInstalacao } from "@/lib/branding/instalacao";
+import { logoDaCamada } from "@/lib/branding/logo";
 import { REGUA_DO_PRODUTO } from "@/lib/branding/regua-do-produto";
 import { camadaDaInstalacao, camadaDoAmbiente, resolverMarca } from "@/lib/branding/resolve";
 import { env } from "@/lib/env";
+import { tagDeIdioma } from "@/lib/i18n/datas";
+import { normalizarIdioma } from "@/lib/i18n/idiomas";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 import { FormularioDaMarca } from "./_form";
 
@@ -19,9 +23,9 @@ export const dynamic = "force-dynamic";
  * a mesma linha renderiza diferente dos dois lados. Fuso fixo porque a coluna é
  * da INSTALAÇÃO — não há organização resolvida nesta tela de onde tirar um.
  */
-function instanteLegivel(iso: string | null): string | null {
+function instanteLegivel(iso: string | null, idioma: string): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleString("pt-BR", {
+  return new Date(iso).toLocaleString(idioma, {
     timeZone: "America/Sao_Paulo",
     dateStyle: "short",
     timeStyle: "short",
@@ -54,6 +58,7 @@ function instanteLegivel(iso: string | null): string | null {
 export default async function Page() {
   const usuario = await loadAuthUser();
   if (!usuario?.is_platform_admin) notFound();
+  const idioma = normalizarIdioma(usuario.locale);
 
   const linha = await marcaDaInstalacao();
   // A MESMA pilha do `app/layout.tsx` — banco acima, arquivo de instalação
@@ -77,9 +82,12 @@ export default async function Page() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Marca</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{traduzir("Marca", idioma)}</h1>
         <p className="mt-1 text-sm text-text-muted">
-          O nome e a cor que este sistema mostra para todo mundo que usa esta instalação.
+          {traduzir(
+            "O nome e a cor que este sistema mostra para todo mundo que usa esta instalação.",
+            idioma,
+          )}
         </p>
       </div>
 
@@ -95,12 +103,15 @@ export default async function Page() {
         }}
         nomeEmVigor={marca.name}
         logoEmVigor={marca.logoUrl}
+        logoEscuroEmVigor={marca.logoDarkUrl}
+        // Mesma conversão caminho → URL do logo; `null` sem arquivo subido.
+        iconeDaAba={logoDaCamada(linha?.favicon_path, null)}
         logoDoAmbiente={semOArquivo.logoUrl}
         origens={marca.origens}
         // `seeded_from_env` ligado significa que a linha é cópia do arquivo de
         // instalação, não escolha de alguém nesta tela. Sem linha, também não é.
         definidoNestaTela={linha !== null && !linha.seeded_from_env}
-        fallbackEm={instanteLegivel(linha?.fallback_at ?? null)}
+        fallbackEm={instanteLegivel(linha?.fallback_at ?? null, tagDeIdioma(idioma))}
         fallbackMotivo={linha?.fallback_reason ?? null}
       />
     </div>

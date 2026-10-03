@@ -1,3 +1,4 @@
+import { setExecutionAgentOperation } from '@/lib/atendimento/fronteira-server';
 /**
  * Handler do job `operator_turn` — o papel OPERADOR (spec 16 §3.2).
  *
@@ -36,20 +37,25 @@
 import { z } from 'zod';
 import type pg from 'pg';
 
-import { withFields } from '../obs/logger';
+import { withFields, type Logger } from '../obs/logger';
 import type { JobRow } from '../queue/queue';
 import type { InboundTurnDeps } from './inbound-turn';
 import { checkpointDoJob } from './inbound-turn';
 import { declaracaoDoTurnoSchema, promessasEmAberto, type DeclaracaoDoTurno } from './declaracao';
 import { loadPublishedAgentConfigById } from './agent-config';
 import { isLeadInHandoff } from './human-handoff';
+import { resolveActiveLeadForContact, type LeadCandidate } from '@/lib/leads/active-lead';
+import { fusoDaOrganizacao } from './fuso-da-org';
+import { renderAgora } from '@/lib/tempo/agora';
 import { insertInboxItem } from '../db/repository';
 import { buildMcpTurnTools } from '../edge/crm/mcp-tools';
 import { runModelCall } from '../edge/llm/run-model-call';
 import { avisarCapacidadesAusentes } from './inbound-turn';
+import { maoDoOperador } from './entrega-de-capacidade';
 import { criaRetornoDbPg } from '../../followup/retorno-pg';
 import { emitAgentActivityForContact } from '../../leads/agent-activity';
 import { copyDaPromessaSemDono } from '../../ai/agent-inbox-copy';
+import { normalizarIdioma, type Idioma } from '@/lib/i18n/idiomas';
 
 /**
  * O que o runtime enfileira ao fim do turno do Conversador. Só PONTEIROS: org e
@@ -82,28 +88,66 @@ export const SYSTEM_DO_OPERADOR =
   'conversa que acabou de ocorrer — mover o lead, registrar, abrir o que precisa ser aberto.\n\n' +
   'VOCÊ NÃO FALA COM O CLIENTE. Você não tem como enviar mensagem, e não deve tentar: quem ' +
   'conversa é outro. Se algo exigir falar com a pessoa, registre e siga.\n\n' +
+  'ATENÇÃO: quem conversou só FALA — ele não grava nada no CRM sozinho. Se a promessa dele veio ' +
+  'redigida como já concluída ("registrei com o Fulano", "já está com a equipe", "ficou ' +
+  'combinado"), isso é o que ele DISSE ao cliente, não prova de que algo foi registrado. O passado ' +
+  'na frase não é evidência de ação — trate a promessa como pendente até você mesmo confirmar ou ' +
+  'registrar (mover o lead, abrir nota, o que fizer sentido com as ferramentas que você tem).\n\n' +
   'Use apenas o que a conversa sustenta. Não invente avanço, não registre o que ninguém disse. ' +
   'Se não houver nada a fazer, não faça nada — um turno sem ação é uma resposta válida.';
 
-/** O briefing do turno: o que o Conversador declarou, em linguagem de negócio. */
+/**
+ * O briefing do turno: o que o Conversador declarou, em linguagem de negócio.
+ *
+ * `agoraBlock` é o relógio (`renderAgora`), e ele não é enfeite aqui: o
+ * Operador é quem EXECUTA a promessa com prazo — o briefing abaixo já ecoa
+ * `— até ${p.prazo}` em ISO —, e `crm_schedule_followup` pode estar entregue só
+ * a ele (`entrega-de-capacidade.ts`), o que faz dele o único papel do turno com
+ * a ferramenta que precisa de data. Cobrar um prazo sem saber que dia é hoje é
+ * o mesmo buraco que a abertura do Conversador tinha.
+ *
+ * Opcional com default vazio de propósito: os chamadores de teste montam o
+ * briefing sem relógio, e o que este parâmetro não pode fazer é obrigar quem já
+ * chamava a mudar.
+ */
 export function renderBriefingDoOperador(
   declaracao: DeclaracaoDoTurno | null,
   promessas: ReturnType<typeof promessasEmAberto>,
+  agoraBlock = '',
+  ids?: { leadId: string | null; contactId: string; conversationId: string },
 ): string {
+  // Identificadores REAIS do atendimento. Sem eles o modelo inventava UUIDs
+  // zerados (`00000000-…`) em `crm_get_lead`/`crm_get_conversation_history` a
+  // cada turno — chamadas inúteis que falhavam ("Lead não encontrado") e
+  // gastavam modelo. ATENÇÃO ao par: `lead_id` é o CARD do funil (`crm_leads.id`),
+  // não o contato — passar o contato fazia `crm_get_lead` falhar mesmo com o id
+  // "real". O Operador não fala com o cliente; expor ids aqui é seguro.
+  const idsLinhas =
+    ids === undefined
+      ? []
+      : [
+          '',
+          `Identificadores deste atendimento: lead_id=${ids.leadId ?? '(sem card)'} · contact_id=${ids.contactId} · conversation_id=${ids.conversationId}.`,
+          'Ao usar ferramentas de lead, use o `lead_id` acima (o card do funil) — nunca invente UUID. ' +
+            (ids.leadId === null ? 'Não há card para este contato: não chame ferramentas de lead.' : ''),
+        ];
+  const comAgora = (linhas: string[]): string =>
+    (agoraBlock === '' ? linhas : [agoraBlock, '', ...linhas]).concat(idsLinhas).join('\n');
   if (declaracao === null) {
     // Ausente ≠ vazia, de novo — e aqui a diferença vira instrução. Dizer ao
     // modelo "não houve declaração" e pedir que ele olhe o estado é diferente de
     // deixá-lo achar que o turno foi vazio.
-    return [
+    return comAgora([
       'O turno anterior NÃO deixou declaração do que aconteceu (fechamento incompleto).',
       'Verifique o estado do lead e registre o que estiver claramente pendente.',
       'Na dúvida, não faça nada.',
-    ].join('\n');
+    ]);
   }
   const linhas = ['Foi isto que aconteceu na conversa que acabou:'];
   if (declaracao.intencoes.length > 0) {
     linhas.push('', 'O que a pessoa quer:');
-    for (const i of declaracao.intencoes) linhas.push(`- ${i.o_que} (na conversa: "${i.evidencia}")`);
+    for (const i of declaracao.intencoes)
+      linhas.push(`- ${i.o_que} (na conversa: "${i.evidencia}")`);
   }
   if (promessas.length > 0) {
     linhas.push('', 'O que foi prometido a ela (precisa existir no sistema):');
@@ -112,7 +156,42 @@ export function renderBriefingDoOperador(
     }
   }
   linhas.push('', 'Deixe o sistema refletindo isso. O que já estiver registrado, não repita.');
-  return linhas.join('\n');
+  return comAgora(linhas);
+}
+
+/**
+ * O CARD do funil (`crm_leads.id`) do contato — que NÃO é o `contact_id`. As
+ * ferramentas de lead do Operador operam sobre o card; sem este id o modelo
+ * inventava UUIDs zerados e `crm_get_lead`/`crm_update_lead` falhavam.
+ *
+ * Qual card é a MESMA regra do resto do motor (`resolveActiveLeadForContact`):
+ * o negócio ABERTO; ambíguo ou nenhum = `null`, e o briefing diz para não chamar
+ * ferramenta de lead. "O mais recente" apontaria para um negócio perdido/ganho.
+ *
+ * Best-effort: falha de leitura vira `null` — mas registrada, não engolida.
+ */
+export async function cardDoFunil(
+  pool: Pick<pg.Pool, 'query'>,
+  tenantId: string,
+  contactId: string,
+  log: Pick<Logger, 'warn'>,
+): Promise<string | null> {
+  try {
+    const { rows } = await pool.query<LeadCandidate>(
+      `select l.id, l.organization_id, l.pipeline_id, l.status,
+              l.last_activity_at, l.created_at
+         from crm_leads l
+        where l.organization_id = $1 and l.contact_id = $2`,
+      [tenantId, contactId],
+    );
+    const alvo = resolveActiveLeadForContact(rows);
+    return alvo.routed ? alvo.leadId : null;
+  } catch (err) {
+    log.warn('card do funil não resolvido — o briefing do operador segue sem lead_id', {
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 120),
+    });
+    return null;
+  }
 }
 
 /** O que o Operador decidiu neste turno — vai a `event_log` e, quando muda o que
@@ -132,7 +211,9 @@ export type DesfechoDoOperador =
  * exatamente o alarme falso que este conserto existe para matar.
  */
 export function nomesDasFerramentasChamadas(
-  saida: { result: { steps: ReadonlyArray<{ toolCalls?: ReadonlyArray<{ toolName?: string }> }> } } | null,
+  saida: {
+    result: { steps: ReadonlyArray<{ toolCalls?: ReadonlyArray<{ toolName?: string }> }> };
+  } | null,
 ): string[] {
   if (saida === null) return [];
   return saida.result.steps.flatMap((s) =>
@@ -142,8 +223,11 @@ export function nomesDasFerramentasChamadas(
 
 /** Quem ficou responsável pela promessa que o Conversador declarou. */
 export type DonoDaPromessa =
-  | { assumida: true; por: 'ferramenta_do_operador' | 'retorno_agendado' }
-  | { assumida: false; porque: 'operador_sem_ferramentas' | 'operador_nao_agiu' | 'operador_nao_rodou' };
+  | { assumida: true; por: 'ferramenta_do_operador' | 'retorno_agendado' | 'caso_aberto' }
+  | {
+      assumida: false;
+      porque: 'operador_sem_ferramentas' | 'operador_nao_agiu' | 'operador_nao_rodou';
+    };
 
 /**
  * A APURAÇÃO — pura, testável sem banco, sem modelo e sem fila, como
@@ -160,6 +244,11 @@ export type DonoDaPromessa =
  *
  * - ferramenta chamada NESTE turno vence retorno pré-existente, porque foi este
  *   turno que agiu;
+ * - CASO aberto esperando uma pessoa também é dono: o Conversador pediu ajuda à
+ *   equipe ("dejame confirmar con el equipo") e a pergunta já está na Central,
+ *   com resumo e bloqueio. Acusar "ninguém ficou responsável" ali é falso — e
+ *   foi medido em produção: o caso aberto às 02:42 e, às 02:59, o aviso de
+ *   promessa sem dono para a MESMA pergunta;
  * - `operador_sem_ferramentas` vence `operador_nao_agiu` mesmo com o papel
  *   ligado, porque a AÇÃO que cabe ao dono do negócio é outra — marcar
  *   capacidades na tela, não decidir sobre este cliente.
@@ -167,11 +256,15 @@ export type DonoDaPromessa =
 export function apuraDonoDaPromessa(input: {
   ferramentasChamadas: readonly string[];
   temRetornoVivo: boolean;
+  /** Há caso da conversa esperando uma pessoa (`agent_cases`). */
+  temCasoAberto?: boolean;
   operadorRodou: boolean;
   operadorTemFerramentas: boolean;
 }): DonoDaPromessa {
-  if (input.ferramentasChamadas.length > 0) return { assumida: true, por: 'ferramenta_do_operador' };
+  if (input.ferramentasChamadas.length > 0)
+    return { assumida: true, por: 'ferramenta_do_operador' };
   if (input.temRetornoVivo) return { assumida: true, por: 'retorno_agendado' };
+  if (input.temCasoAberto) return { assumida: true, por: 'caso_aberto' };
   if (!input.operadorRodou) return { assumida: false, porque: 'operador_nao_rodou' };
   if (!input.operadorTemFerramentas) return { assumida: false, porque: 'operador_sem_ferramentas' };
   return { assumida: false, porque: 'operador_nao_agiu' };
@@ -300,11 +393,18 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
     // alguém publicar o primeiro agente — saía antes de apurar qualquer coisa, e
     // uma promessa feita ali não gerava rede nenhuma. Primeira impressão é onde
     // um lead perdido custa o cliente inteiro.
-    const { declaracao, houveCheckpoint } = await lerDeclaracaoDoTurno(pool, tenantId, leadId, payload.origin_job_id);
+    const { declaracao, houveCheckpoint } = await lerDeclaracaoDoTurno(
+      pool,
+      tenantId,
+      leadId,
+      payload.origin_job_id,
+    );
     const promessas = promessasEmAberto(declaracao);
 
     const agentConfig =
-      payload.agent_id === null ? null : await loadPublishedAgentConfigById(pool, tenantId, payload.agent_id);
+      payload.agent_id === null
+        ? null
+        : await loadPublishedAgentConfigById(pool, tenantId, payload.agent_id);
     if (agentConfig === null) {
       // Sem agente publicado não há config de papel para ler. Não é erro: é o
       // turno que rodou no genérico. Mas a promessa continua tendo de ter dono.
@@ -323,6 +423,7 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
             ferramentasChamadas: [],
             operadorRodou: false,
             operadorTemFerramentas: false,
+            conversationId: payload.conversation_id,
           }),
           ferramentasChamadas: [],
           houveCheckpoint,
@@ -332,6 +433,14 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
       return;
     }
 
+    if (agentConfig.pausedAt || agentConfig.operationMode === 'assisted') return;
+    if (agentConfig.operationRevision)
+      setExecutionAgentOperation({
+        organizationId: tenantId,
+        agentId: agentConfig.agentId,
+        versionId: agentConfig.versionId,
+        revision: agentConfig.operationRevision,
+      });
     const decisao = decidirSeRoda({ papelLigado: agentConfig.operatorEnabled, declaracao });
 
     if (!decisao.roda) {
@@ -353,6 +462,7 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
             ferramentasChamadas: [],
             operadorRodou: false,
             operadorTemFerramentas: agentConfig.operatorToolIds.length > 0,
+            conversationId: payload.conversation_id,
           }),
           ferramentasChamadas: [],
           houveCheckpoint,
@@ -370,16 +480,18 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
     // registra a promessa em aberto. Chamar o modelo para descobrir que ele não
     // tem mão nenhuma seria gastar a chave do self-hoster para nada.
     let mcp: Awaited<ReturnType<typeof buildMcpTurnTools>> = null;
-    if (agentConfig.operatorToolIds.length > 0) {
+    const mao = maoDoOperador(agentConfig);
+    if (mao.toolIds.length > 0) {
       try {
         mcp = await buildMcpTurnTools(
           deps.crmCfg,
-          { organizationId: tenantId, jobId: job.id },
+          { organizationId: tenantId, jobId: job.id, contactId: leadId },
           // A ponte lê `toolIds`; o papel guarda a lista dele em
           // `operatorToolIds`. A troca acontece AQUI, num ponto só, para que
           // nenhum caminho do Operador alcance a lista do Conversador por
-          // engano — que seria dar a ele a mão do outro.
-          { ...agentConfig, toolIds: agentConfig.operatorToolIds },
+          // engano — que seria dar a ele a mão do outro. E sem o que é
+          // `FORA_DO_OPERADOR` (a proposta nascia na primeira mensagem).
+          mao,
           log,
         );
       } catch (err) {
@@ -387,7 +499,9 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
         // derruba o job, mas também não morre no log de um contêiner que
         // ninguém abre — o aviso vai para a Central.
         const detalhe = (err instanceof Error ? err.message : String(err)).slice(0, 200);
-        log.error('capacidades do operador não montadas — o papel segue sem elas', { error: detalhe });
+        log.error('capacidades do operador não montadas — o papel segue sem elas', {
+          error: detalhe,
+        });
         await avisarCapacidadesAusentes(pool, tenantId, payload.conversation_id, detalhe, log);
       }
     }
@@ -405,6 +519,8 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
     // tempo: o desfecho não tinha o que persistir (virou log.info) e o aviso
     // precisou de um proxy — a contagem de promessas DECLARADAS, que é um fato
     // sobre o Conversador, não sobre o Operador.
+    const leadCardId = mcp === null ? null : await cardDoFunil(pool, tenantId, leadId, log);
+
     let saida: Awaited<ReturnType<typeof runModelCall>> | null = null;
     try {
       if (mcp !== null) {
@@ -420,7 +536,20 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
             // pergunta que o dono do negócio vai fazer — não teria resposta.
             purpose: 'operator_turn',
             system: SYSTEM_DO_OPERADOR,
-            messages: [{ role: 'user', content: renderBriefingDoOperador(declaracao, promessas) }],
+            messages: [
+              {
+                role: 'user',
+                content: renderBriefingDoOperador(
+                  declaracao,
+                  promessas,
+                  renderAgora(
+                    deps.clock?.() ?? new Date(),
+                    await fusoDaOrganizacao(pool, tenantId, log),
+                  ),
+                  { leadId: leadCardId, contactId: leadId, conversationId: payload.conversation_id },
+                ),
+              },
+            ],
             tools: mcp.tools,
             maxSteps: agentConfig.maxSteps,
             // O modelo E o provider/credencial, sempre juntos — a regra do PR
@@ -461,6 +590,7 @@ export function createOperatorTurnHandler(deps: InboundTurnDeps) {
           ferramentasChamadas,
           operadorRodou: true,
           operadorTemFerramentas: agentConfig.operatorToolIds.length > 0,
+          conversationId: payload.conversation_id,
         }),
         ferramentasChamadas,
         houveCheckpoint,
@@ -497,6 +627,8 @@ export async function apurarComRetorno(
     ferramentasChamadas: readonly string[];
     operadorRodou: boolean;
     operadorTemFerramentas: boolean;
+    /** A conversa do turno — é por ela que o caso aberto se acha. */
+    conversationId: string;
   },
   /**
    * Costura só para o teste alcançar o FIO. Produção nunca passa este argumento.
@@ -506,10 +638,55 @@ export async function apurarComRetorno(
    */
   buscaRetorno: (t: string, l: string) => Promise<unknown> = (t, l) =>
     criaRetornoDbPg(pool).buscaRetornoVivo(t, l),
+  /** Mesma costura, para o caso aberto. */
+  buscaCaso: (t: string, c: string) => Promise<boolean> = (t, c) => temCasoAbertoPg(pool, t, c),
 ): Promise<DonoDaPromessa | null> {
   if (promessasDeclaradas === 0) return null;
+  const { conversationId, ...resto } = entrada;
   const retorno = await buscaRetorno(tenantId, leadId);
-  return apuraDonoDaPromessa({ ...entrada, temRetornoVivo: retorno !== null });
+  // Só pergunta pelo caso quando ele decide algo: com retorno vivo, já há dono.
+  const temCasoAberto = retorno === null ? await buscaCaso(tenantId, conversationId) : false;
+  return apuraDonoDaPromessa({ ...resto, temRetornoVivo: retorno !== null, temCasoAberto });
+}
+
+/**
+ * O idioma da organização — ninguém está logado quando o motor escreve. Nunca
+ * lança: idioma é enfeite perto do aviso, e um `select` que falhe não pode
+ * impedi-lo de nascer (mesma regra do aviso de passagem, `human-handoff.ts`).
+ */
+async function idiomaDaOrganizacao(pool: pg.Pool, tenantId: string): Promise<Idioma> {
+  try {
+    const { rows } = await pool.query<{ locale: string | null }>(
+      'select locale from organizations where id = $1',
+      [tenantId],
+    );
+    return normalizarIdioma(rows[0]?.locale ?? null);
+  } catch {
+    return 'pt-BR';
+  }
+}
+
+/**
+ * Há caso desta conversa esperando uma pessoa? `awaiting_human` e `escalated`
+ * são os estados em que a pergunta está com a equipe; `awaiting_lead` já voltou
+ * para o cliente, e resolvido/cancelado não é dono de nada.
+ *
+ * Falha de leitura responde `false`: na dúvida o aviso sai, que é o erro barato
+ * — calar uma promessa sem dono é o caro.
+ */
+async function temCasoAbertoPg(pool: pg.Pool, tenantId: string, conversationId: string): Promise<boolean> {
+  try {
+    const { rowCount } = await pool.query(
+      `select 1 from agent_cases
+        where organization_id = $1 and conversation_id = $2
+          and status in ('awaiting_human', 'escalated')
+        limit 1`,
+      [tenantId, conversationId],
+    );
+    return (rowCount ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -540,7 +717,7 @@ export async function apurarComRetorno(
  * silêncio também não serve — log de worker em VPS não é superfície de nada, e
  * este produto é instalado por quem nunca vai abrir um contêiner.
  */
-async function registrarDesfecho(
+export async function registrarDesfecho(
   pool: pg.Pool,
   entrada: {
     tenantId: string;
@@ -584,6 +761,11 @@ async function registrarDesfecho(
         JSON.stringify({
           desfecho: desfecho.tipo,
           porque: 'porque' in desfecho ? desfecho.porque : null,
+          // QUAL agente. Sem esta chave a medida do papel só existe agregada por
+          // organização, e o painel que a mostra vive na página de UM agente —
+          // apontando ação de configuração para o agente errado (invariante 7:
+          // o sinal de retorno precisa ter a dimensão do atuador).
+          agent_id: entrada.agentId,
           ferramentas_chamadas: entrada.ferramentasChamadas,
           promessas_declaradas: entrada.promessasDeclaradas,
           promessa_assumida_por: dono?.assumida === true ? dono.por : null,
@@ -601,7 +783,11 @@ async function registrarDesfecho(
 
   if (!semDono || dono === null || dono.assumida) return;
 
-  const texto = copyDaPromessaSemDono(entrada.promessasDeclaradas, dono.porque);
+  const texto = copyDaPromessaSemDono(
+    entrada.promessasDeclaradas,
+    dono.porque,
+    await idiomaDaOrganizacao(pool, entrada.tenantId),
+  );
 
   try {
     await emitAgentActivityForContact({
@@ -645,4 +831,3 @@ async function registrarDesfecho(
     });
   }
 }
-

@@ -2,6 +2,7 @@
 
 import { useTransition } from "react";
 import { toast } from "sonner";
+import { useT } from "@/hooks/i18n/useT";
 
 import { Button } from "@/components/ui/button";
 import { finishOnboarding } from "@/app/actions/onboarding/finishOnboarding";
@@ -11,22 +12,52 @@ import type { PecaDoSistema } from "@/lib/onboarding/o-que-mais-existe";
 export function DoneClient({
   itens,
   pecas,
+  noAr,
 }: {
   itens: ItemDoResumo[];
   pecas: PecaDoSistema[];
+  /**
+   * Existe ao menos um agente PUBLICADO nesta organização (não-arquivado, com
+   * `published_version_id`)? É a página que lê o banco e passa — este componente
+   * é cliente e não tem como perguntar sem um fetch que faria a tela piscar.
+   */
+  noAr: boolean;
 }) {
+  const t = useT();
   const [pending, startTransition] = useTransition();
   const pendentes = itens.filter((i) => !i.feito);
+  /**
+   * O passo da IA ficou de fora (pulado ou nunca feito)? Sem ele não há
+   * atendente treinado, e a frase antiga dizia "já está de pé" do mesmo jeito.
+   */
+  const semIa = itens.some((i) => i.segmento === "setup-ai" && !i.feito);
+
+  /**
+   * A CONCORDÂNCIA COM A REALIDADE.
+   *
+   * O fim do wizard era uma frase fixa: "Tudo pronto! Seu funcionário já está
+   * de pé" — dita também para quem pulou o passo da IA e para quem ficou com o
+   * atendente em rascunho. O wizard prometia o que não tinha entregue, e a
+   * pessoa só descobria isso no primeiro cliente que ninguém respondeu.
+   *
+   * O que decide é o BANCO (`noAr`), não a contagem de pendências: publicar é
+   * o que coloca o atendente no ar, e pular um passo que não depende da IA
+   * (telefone, equipe) não tira ninguém do ar.
+   */
+  const titulo = noAr ? t("Tudo pronto!") : t("Quase lá!");
+  const resumo = !noAr
+    ? semIa
+      ? t("O passo da IA ficou para depois: ele ainda não foi treinado nem colocado no ar.")
+      : t("Ele já foi treinado, mas o atendimento ainda não foi publicado — ele segue em rascunho.")
+    : pendentes.length === 0
+      ? t("Seu funcionário está montado. Daqui em diante é só acompanhar.")
+      : t("Seu funcionário já está de pé. O que ficou para depois continua te esperando.");
 
   return (
     <div className="space-y-6 rounded-lg border bg-background p-6">
       <div className="space-y-1 text-center">
-        <h2 className="text-2xl font-semibold tracking-tight">Tudo pronto!</h2>
-        <p className="text-sm text-muted-foreground">
-          {pendentes.length === 0
-            ? "Seu funcionário está montado. Daqui em diante é só acompanhar."
-            : "Seu funcionário já está de pé. O que ficou para depois continua te esperando."}
-        </p>
+        <h2 className="text-2xl font-semibold tracking-tight">{titulo}</h2>
+        <p className="text-sm text-muted-foreground">{resumo}</p>
       </div>
 
       <ul className="mx-auto max-w-sm space-y-2 text-left text-sm">
@@ -40,14 +71,14 @@ export function DoneClient({
               }
             />
             <span className={it.feito ? "" : "text-muted-foreground"}>
-              {it.rotulo}
+              {t(it.rotulo)}
               {/*
                 "Pulado" é escolha da pessoa; "ainda não" é o que ela não
                 chegou a fazer. Antes tudo que não estivesse feito virava
                 "(pulado)", inclusive passo que a instalação nunca ofereceu —
                 o wizard cobrando o que ninguém pediu.
               */}
-              {it.pulado ? " (você pulou)" : it.feito ? "" : " (ainda não)"}
+              {it.pulado ? ` (${t("você pulou")})` : it.feito ? "" : ` (${t("ainda não")})`}
             </span>
           </li>
         ))}
@@ -63,9 +94,9 @@ export function DoneClient({
       */}
       <section className="space-y-3 border-t pt-6">
         <div>
-          <h3 className="text-sm font-medium">O que mais tem aqui</h3>
+          <h3 className="text-sm font-medium">{t("O que mais tem aqui")}</h3>
           <p className="text-xs text-muted-foreground">
-            Você não precisa mexer em nada disso agora. É só para saber que existe.
+            {t("Você não precisa mexer em nada disso agora. É só para saber que existe.")}
           </p>
         </div>
         {/*
@@ -84,14 +115,14 @@ export function DoneClient({
           {pecas.map((p) => (
             <li key={p.href} className="rounded-md border p-3">
               <a href={p.href} className="text-sm font-medium underline-offset-2 hover:underline">
-                {p.comoChamar}
+                {t(p.comoChamar)}
               </a>
-              <span className="ml-1 text-xs text-muted-foreground">({p.label})</span>
-              <p className="mt-1 text-xs text-muted-foreground">{p.porQue}</p>
+              <span className="ml-1 text-xs text-muted-foreground">({t(p.label)})</span>
+              <p className="mt-1 text-xs text-muted-foreground">{t(p.porQue)}</p>
 
               <details className="group mt-2">
                 <summary className="cursor-pointer list-none text-xs text-muted-foreground underline underline-offset-2">
-                  Como funciona
+                  {t("Como funciona")}
                 </summary>
                 <ol className="mt-2 space-y-1.5">
                   {p.comoFunciona.map((passo, i) => (
@@ -102,7 +133,7 @@ export function DoneClient({
                       >
                         {i + 1}
                       </span>
-                      <span>{passo}</span>
+                      <span>{t(passo)}</span>
                     </li>
                   ))}
                 </ol>
@@ -119,11 +150,11 @@ export function DoneClient({
           onClick={() =>
             startTransition(async () => {
               const res = await finishOnboarding();
-              if (res && !res.ok) toast.error(`Falha: ${res.error}`);
+              if (res && !res.ok) toast.error(`${t("Falha:")} ${res.error}`);
             })
           }
         >
-          {pending ? "Finalizando..." : "Começar a usar"}
+          {pending ? t("Finalizando...") : t("Começar a usar")}
         </Button>
       </div>
     </div>

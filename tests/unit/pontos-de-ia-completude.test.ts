@@ -22,9 +22,11 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 
 import { describe, expect, it } from "vitest";
 
+import { PEDIDOS_DO_CLIENTE, rotuloDaChamadaDoJev } from "@/lib/ai/decisao/tarefas";
 import {
   PONTOS_DE_IA,
   pontosPorPapel,
@@ -33,24 +35,39 @@ import {
 
 import { arquivosDeCodigo, RAIZ_DO_REPO } from "./helpers/varrer-codigo";
 
-/**
- * Os purposes que o código REALMENTE passa a `runModelCall`.
- *
- * Casa `purpose: 'x'` em arquivo de produção. Não casa declaração de tipo
- * (`purpose: 'a' | 'b'`) nem leitura (`purpose: payload.purpose`) — só o
- * literal único, que é a forma de quem está emitindo de fato.
- */
+/** Literal values emitted by object properties, including both branches of a conditional.
+ * Type declarations, comments and string contents cannot manufacture a call site. */
+function purposesDoTexto(texto: string, arquivo = "source.ts"): string[] {
+  const ast = ts.createSourceFile(arquivo, texto, ts.ScriptTarget.Latest, true, arquivo.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const result: string[] = [];
+  const literals = (node: ts.Expression): string[] => {
+    if (ts.isStringLiteralLike(node)) return [node.text];
+    if (ts.isConditionalExpression(node)) return [...literals(node.whenTrue), ...literals(node.whenFalse)];
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)) return literals(node.expression);
+    return [];
+  };
+  const visit = (node: ts.Node) => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(ast).replace(/["']/g, "") === "purpose") {
+      // NodeResult do follow-up é comando para fila, não ponto de chamada LLM.
+      // A distinção vem da forma discriminada retornada, nunca de uma lista
+      // de purposes ignorados (que esconderia um LLM homônimo real).
+      const object = node.parent;
+      const enqueueResult = ts.isObjectLiteralExpression(object) && ts.isReturnStatement(object.parent) &&
+        object.properties.some(p => ts.isPropertyAssignment(p) && p.name.getText(ast) === "kind" &&
+          ts.isStringLiteralLike(p.initializer) && p.initializer.text === "enqueue_turn");
+      if (!enqueueResult) result.push(...literals(node.initializer));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return result;
+}
 function purposesEmitidosNoCodigo(): Map<string, string[]> {
   const encontrados = new Map<string, string[]>();
-  const emissao = /purpose:\s*'([a-z_]+)'\s*[,}]/g;
-
   for (const arquivo of arquivosDeCodigo(["lib", "workers", "app"])) {
-    const conteudo = readFileSync(arquivo, "utf8");
-    for (const m of conteudo.matchAll(emissao)) {
-      const purpose = m[1]!;
-      const rel = path.relative(RAIZ_DO_REPO, arquivo);
+    for (const purpose of purposesDoTexto(readFileSync(arquivo, "utf8"), arquivo)) {
       const lista = encontrados.get(purpose) ?? [];
-      lista.push(rel);
+      lista.push(path.relative(RAIZ_DO_REPO, arquivo));
       encontrados.set(purpose, lista);
     }
   }
@@ -100,24 +117,46 @@ const FORA_DO_SEAM: Record<string, { arquivo: string; marcador: string }> = {
   },
 };
 
+/**
+ * `purpose` que NÃO é ponto do registro, de propósito: a chamada do Jev que
+ * pergunta as tarefas sem ponto (`lib/ai/decisao/pedidos.ts`). Não há modelo
+ * para escolher ali — o Jev não se escolhe por ponto, e a regra que ele
+ * acompanha não usa IA —, então um ponto no registro seria o botão que não
+ * controla nada que o segundo caso abaixo reprova. Quem a nomeia é outra tela:
+ * IA › Execuções e o cartão do Jev, por `rotuloDaChamadaDoJev` — e o caso
+ * "a chamada do Jev sem ponto" confere que ela tem nome e é de fato emitida.
+ */
+const CHAMADAS_DO_JEV_SEM_PONTO: ReadonlySet<string> = new Set([PEDIDOS_DO_CLIENTE.purpose]);
+
 describe("registro de pontos de IA × código", () => {
+  const emitidos = purposesEmitidosNoCodigo();
+  it("instrumento lê os dois ramos e aspas distintas sem contar tipos/comentários", () => {
+    expect(purposesDoTexto(`
+      type Input = { purpose: 'nao_emitido' };
+      // purpose: 'comentario'
+      const a = { purpose: preview ? "agent_preview" : 'agent_turn' };
+    `)).toEqual(["agent_preview", "agent_turn"]);
+    expect(purposesDoTexto(`const a = { purpose: preview ? 'ponto_orfao' : 'agent_turn' };`)).toContain("ponto_orfao");
+    expect(purposesDoTexto(`const a = { purpose: payload.purpose };`)).toEqual([]);
+    expect(purposesDoTexto(`function queue() { return { kind: "enqueue_turn", purpose: "send_message" }; }`)).toEqual([]);
+    expect(purposesDoTexto(`runModelCall(db, cfg, { purpose: "send_message" });`)).toEqual(["send_message"]);
+  });
+
   it("a varredura enxerga o código (controle positivo)", () => {
     // Instrumento quebrado devolve zero, e zero é indistinguível de "tudo em
     // ordem" nos dois testes abaixo — ambos passariam com a varredura morta.
     // `agent_turn` é o ponto mais central do produto: se ele sumiu da
     // varredura, foi a varredura que quebrou, não o código.
-    const emitidos = purposesEmitidosNoCodigo();
     expect(emitidos.size).toBeGreaterThan(10);
     expect(emitidos.get("agent_turn")).toBeDefined();
     expect(arquivosDeCodigo(["lib"]).length).toBeGreaterThan(200);
   });
 
   it("todo purpose emitido no código está no registro", () => {
-    const emitidos = purposesEmitidosNoCodigo();
     const registrados = new Set(PONTOS_DE_IA.map((p) => p.id));
 
     const orfaos = [...emitidos.entries()]
-      .filter(([purpose]) => !registrados.has(purpose))
+      .filter(([purpose]) => !registrados.has(purpose) && !CHAMADAS_DO_JEV_SEM_PONTO.has(purpose))
       .map(([purpose, arquivos]) => `${purpose} (emitido em ${arquivos.join(", ")})`);
 
     expect(
@@ -127,8 +166,15 @@ describe("registro de pontos de IA × código", () => {
     ).toEqual([]);
   });
 
+  it("a chamada do Jev sem ponto é emitida, tem nome de gente e não é ponto do registro", () => {
+    for (const purpose of CHAMADAS_DO_JEV_SEM_PONTO) {
+      expect(emitidos.has(purpose), `${purpose} não é emitido: a exceção ficou sem objeto`).toBe(true);
+      expect(PONTOS_DE_IA.some((p) => p.id === purpose), `${purpose} virou ponto: tire-o da exceção`).toBe(false);
+      expect(rotuloDaChamadaDoJev(purpose), `${purpose} apareceria cru em Execuções`).not.toBeNull();
+    }
+  });
+
   it("todo ponto do registro é emitido por algum código", () => {
-    const emitidos = purposesEmitidosNoCodigo();
 
     const fantasmas: string[] = [];
     for (const ponto of PONTOS_DE_IA) {

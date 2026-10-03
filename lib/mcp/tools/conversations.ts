@@ -12,8 +12,13 @@ import {
   getConversationHandler,
 } from "@/app/api/v1/conversations/_handler";
 import { listMessagesHandler } from "@/app/api/v1/messages/_handler";
+import { audit } from "@/lib/audit";
+import {
+  criarRascunho,
+  JANELA_MAXIMA_HORAS,
+  TEXTO_MAXIMO,
+} from "@/lib/inbox/rascunho-sugerido";
 import { getQueuePositions } from "@/lib/routing/queue";
-import { CONVERSATION_QUEUE_STATUSES } from "@/lib/schemas";
 import { resolveUserNames } from "./_users";
 import type { McpToolDefinition } from "../types";
 
@@ -25,11 +30,15 @@ import type { McpToolDefinition } from "../types";
  * coisas ao mesmo tempo dentro de `lib/routing/queue.ts`. O que a IA lia pela
  * tool e o que a pessoa via na tela não eram a mesma fila.
  */
-function isInQueue(c: { assigned_to_user_id: string | null; status: string }): boolean {
-  return (
-    c.assigned_to_user_id === null &&
-    (CONVERSATION_QUEUE_STATUSES as readonly string[]).includes(c.status)
-  );
+function isInQueue(c: { comando_da_conversa?: string | null }): boolean {
+  // Ele decide UMA coisa: vale a pena buscar as posições de fila para esta
+  // página? Por isso é liberal de propósito — pergunta "não tem dono e não
+  // acabou", que cobre tanto a org COM automático (só `aguardando` está na fila)
+  // quanto a SEM (`automatico` também está, ver `comandosDaFila`). Errar para o
+  // lado do sim custa uma consulta; errar para o não some com a posição que a IA
+  // devolve ao cliente.
+  const q = c.comando_da_conversa;
+  return q === "aguardando" || q === "automatico";
 }
 
 const listInputShape = {
@@ -63,6 +72,18 @@ export const crmListConversations: McpToolDefinition<typeof listInputShape> = {
       {
         // O handler espera LISTA desde que o filtro passou a aceitar vários.
         status: input.status ? [input.status] : undefined,
+        // `undefined` EXPLÍCITO: `.optional()` no Zod produz uma chave
+        // OBRIGATÓRIA de tipo `X | undefined`, não uma chave opcional — omiti-la
+        // é erro de tipo. A tool do MCP não expõe filtro por comando (quem
+        // pergunta é a tela), então ela não filtra por ele.
+        comando: undefined,
+        // `tag` e `modo` também saem `undefined` EXPLICITO, e pela MESMA razão do
+        // `comando`: o `.transform()` do schema de marcador (#1274) torna a chave
+        // de SAÍDA obrigatória-de-tipo (`string[] | undefined`), não opcional.
+        // A tool do MCP não expõe filtro por etiqueta (quem pergunta é a tela), e
+        // omitir a chave seria erro de tipo — não omissão silenciosa.
+        tag: undefined,
+        modo: undefined,
         limit: input.limit,
         cursor: input.cursor,
       },
@@ -194,5 +215,91 @@ export const crmGetConversationHistory: McpToolDefinition<typeof historyInputSha
       cursor: result.cursor,
       has_more: result.has_more,
     };
+  },
+};
+
+const rascunhoInputShape = {
+  conversation_id: z
+    .string()
+    .uuid()
+    .describe(
+      "Conversa que recebe o texto sugerido. Se ainda não existir, POST /api/v1/conversations/open-with-contact abre.",
+    ),
+  texto: z
+    .string()
+    .min(1)
+    .max(TEXTO_MAXIMO)
+    .describe(
+      "Texto sugerido para a pessoa revisar antes de enviar. 1 a " +
+        String(TEXTO_MAXIMO) +
+        " caracteres, o mesmo teto do envio.",
+    ),
+  origem: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .default("integracao")
+    .describe("De onde veio o texto (ex.: 'erp'). É o que a caixa de entrada mostra no aviso de origem."),
+  expira_em_horas: z
+    .number()
+    .int()
+    .min(1)
+    .max(JANELA_MAXIMA_HORAS)
+    .optional()
+    .describe("Janela de validade do rascunho, em horas. Padrão 24."),
+};
+
+/**
+ * MCP write tool — crm_create_conversation_draft (issue #1611).
+ *
+ * A LACUNA: quem integra tem duas saídas e as duas são ruins — enviar por
+ * token (a bolha diz `Sistema`, `sent_by_user_id` nulo, IA não silenciada como
+ * no envio humano) ou copiar-e-colar. Esta tool guarda o TEXTO no servidor e
+ * devolve a URL; **nada é enviado**, e o envio continua sendo clique de gente
+ * (`sent_via='user'`).
+ *
+ * DOUTRINA DIRC: nenhuma regra nova aqui — `criarRascunho` é o MESMO módulo que
+ * `POST /api/v1/conversations/[id]/drafts` chama (filtro de organização na
+ * conferência da conversa, teto de 4096, janela de 24h). Os caminhos são dois;
+ * a casa é uma.
+ */
+export const crmCreateConversationDraft: McpToolDefinition<typeof rascunhoInputShape> = {
+  name: "crm_create_conversation_draft",
+  description:
+    "Cria um RASCUNHO de mensagem para uma conversa, guardado no servidor. NADA é enviado: a pessoa que atende abre a conversa com o texto já no campo e o aviso de origem, e só o clique dela envia. Use quando a mensagem precisa sair de uma PESSOA, mas o texto vem de outro sistema (cobrança vencida, documento faltando, formulário a reenviar). Devolve draft_id e a URL /app/inbox?id=<conversa>&rascunho=<draft_id>.",
+  inputSchema: rascunhoInputShape,
+  category: "write",
+  requiresRole: "agent",
+  requiresScope: "mcp:write",
+  handler: async (input, ctx) => {
+    const rascunho = await criarRascunho(ctx.supabase, {
+      organizationId: ctx.organizationId,
+      conversationId: input.conversation_id,
+      texto: input.texto,
+      origem: input.origem,
+      expiraEmHoras: input.expira_em_horas,
+      apiTokenId: ctx.apiTokenId,
+    });
+    if (!rascunho.ok) {
+      throw new Error(
+        rascunho.motivo === "conversa_nao_encontrada"
+          ? "Conversa não encontrada nesta organização."
+          : rascunho.motivo === "origem_invalida"
+            ? "Origem do rascunho inválida."
+            : "Texto do rascunho inválido.",
+      );
+    }
+    await audit({
+      action: "conversation.draft_created",
+      actorUserId: ctx.actor.type === "user" ? ctx.actor.id : null,
+      actorApiTokenId: ctx.apiTokenId,
+      organizationId: ctx.organizationId,
+      resourceType: "conversation",
+      resourceId: input.conversation_id,
+      requestId: ctx.requestId,
+      metadata: { draft_id: rascunho.draftId, origem: input.origem, via: "mcp" },
+    });
+    return { draft_id: rascunho.draftId, url: rascunho.url };
   },
 };

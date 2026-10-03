@@ -1,3 +1,4 @@
+import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET  /api/v1/settings/api-tokens — list tokens for the active org (no plaintext).
  * POST /api/v1/settings/api-tokens — create token. Plaintext returned UMA VEZ.
@@ -14,6 +15,7 @@ import { audit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth/require-role";
 import { createApiTokenSchema, validateRequest } from "@/lib/schemas";
 import { createClient } from "@/lib/supabase/server";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -37,9 +39,13 @@ export async function GET(_req: NextRequest): Promise<Response> {
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("admin", { requestId, resource: "api_tokens" });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { user: authUser, org: activeOrg } = authz;
 
   let input;
@@ -80,7 +86,17 @@ export async function POST(req: NextRequest): Promise<Response> {
     .select(SELECT_COLS)
     .single();
 
-  if (insErr) return fail("internal_error", insErr.message, 500, { requestId });
+  if (insErr) {
+    // O teto de tokens ATIVOS por organização é do BANCO (migration 0415): quem
+    // conta é o gatilho `trg_teto_de_tokens_ativos`, e a mensagem — com o limite
+    // e o caminho para liberar espaço (revogar um token) — vem de lá, porque é
+    // ele quem sabe o número. Sem este ramo a pessoa veria "internal_error" no
+    // lugar da instrução que o erro já traz, e o toast da tela propagaria o 500.
+    if (insErr.code === "PT409") {
+      return fail("api_token_teto_atingido", insErr.message, 409, { requestId });
+    }
+    return fail("internal_error", insErr.message, 500, { requestId });
+  }
 
   await audit({
     action: "token.created",
@@ -96,7 +112,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     {
       ...created,
       plaintext,
-      _warning: "Salve este token agora — ele não será mostrado novamente.",
+      _warning: t("Salve este token agora — ele não será mostrado novamente."),
     },
     { status: 201, requestId },
   );

@@ -12,6 +12,7 @@ import { z } from "zod";
 import { ok, fail } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { createClient } from "@/lib/supabase/server";
+import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
@@ -49,9 +50,11 @@ export async function GET(req: NextRequest): Promise<Response> {
   const authz = await requireRole("admin", {
     requestId,
     resource: "lgpd_requests",
-    allowPlatformAdmin: true,
+    allowPlatformAdmin: "leitura",
+    permiteOrgSuspensa: true,
   });
   if (!authz.ok) return authz.response;
+  const t = (texto: string) => traduzir(texto, authz.user.idioma);
   const { org: activeOrg } = authz;
 
   const supabase = await createClient();
@@ -63,7 +66,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   });
   const parsed = querySchema.safeParse(rawParams);
   if (!parsed.success) {
-    return fail("validation_failed", "Parâmetros inválidos.", 422, {
+    return fail("validation_failed", t("Parâmetros inválidos."), 422, {
       details: parsed.error.flatten(),
       requestId,
     });

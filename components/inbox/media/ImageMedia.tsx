@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { useT } from "@/hooks/i18n/useT";
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,13 +12,20 @@ import { mediaSrc } from "./media-utils";
 interface Props {
   messageId: string;
   alt: string;
+  /**
+   * Fonte alternativa: a mídia da NOTA interna (#1863, F3) é servida pela rota
+   * da nota, não pela de mensagem — `messageId` não existe lá. Quando ausente,
+   * o caminho é o de sempre (`/api/v1/messages/{id}/media`).
+   */
+  src?: string;
 }
 
 /** Miniatura na bolha + lightbox (Dialog) no clique. Padrão WhatsApp Web. */
-export function ImageMedia({ messageId, alt }: Props) {
+export function ImageMedia({ messageId, alt, src: fonte }: Props) {
+  const t = useT();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [open, setOpen] = useState(false);
-  const src = mediaSrc(messageId);
+  const src = fonte ?? mediaSrc(messageId);
 
   if (state === "error")
     return (
@@ -30,7 +38,7 @@ export function ImageMedia({ messageId, alt }: Props) {
     <>
       <button
         type="button"
-        aria-label="Ampliar imagem"
+        aria-label={t("Ampliar imagem")}
         onClick={() => setOpen(true)}
         disabled={state !== "ready"}
         aria-disabled={state !== "ready"}

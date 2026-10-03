@@ -32,8 +32,10 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Env do self-host padrão: só a chave da Anthropic (o que o install.sh exige).
-// Sem chave de embedding o RAG é pulado, então a confiança é 0 — é isso que
-// deixa o gatilho G3 controlável só pelo `confidence_threshold` do agente.
+// Sem chave de embedding não há citação, logo não há medida de similaridade e
+// o G3 não desviaria por limiar. Aqui isso é até irrelevante: o worker legado
+// NUNCA chega no G3 — ele skipa antes (issue #1660), e é esse skip que os
+// casos abaixo provam.
 const envMock: Record<string, string> = {
   ANTHROPIC_API_KEY: "sk-ant-teste",
   AI_GATEWAY_API_KEY: "",
@@ -66,6 +68,8 @@ const OUTBOUND_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 // Corpo neutro: qualquer gatilho de handoff (G1 "falar com humano", G4
 // "advogado") desviaria o fluxo ANTES do LLM e o insert nunca aconteceria.
+const SERVICE = { organization_id: ORG_ID, contact_id: CONTACT_ID, conversation_id: CONV_ID,
+  service_revision: 1, demanda_id: null, demanda_revision: null, status: "open", demanda_fechada_em: null };
 const INBOUND_BODY = "bom dia, qual o prazo de entrega?";
 
 /**
@@ -100,7 +104,7 @@ interface LinhaInserida {
  * modelo, APLICA a constraint de `sent_via` em `messages` — devolvendo o mesmo
  * formato de erro do PostgREST (código 23514) que o worker recebe do banco.
  */
-function makeAdminStub(confidenceThreshold: number) {
+function makeAdminStub() {
   const inserted: LinhaInserida[] = [];
 
   const from = (table: string) => {
@@ -115,6 +119,7 @@ function makeAdminStub(confidenceThreshold: number) {
             bot_silenced_until: null,
             last_handoff_at: null,
             assignee_kind: "ai",
+            organizations: { status: "active" },
             contacts: {
               id: CONTACT_ID,
               display_name: null, // sem PII em teste (LGPD)
@@ -124,18 +129,25 @@ function makeAdminStub(confidenceThreshold: number) {
             },
           }
         : table === "messages"
-          ? { id: MSG_ID, body: INBOUND_BODY, direction: "inbound", organization_id: ORG_ID }
+          ? { ...SERVICE, id: MSG_ID, body: INBOUND_BODY, direction: "inbound", organization_id: ORG_ID }
           : table === "ai_agents"
             ? {
                 id: AGENT_ID,
                 organization_id: ORG_ID,
                 model: "anthropic/claude-sonnet-4-6",
                 system_prompt: "Você é um atendente.",
-                config: { confidence_threshold: confidenceThreshold },
+                config: {},
                 guardrails: {},
                 active_kb_version_id: "99999999-9999-4999-8999-999999999999",
                 is_active: true,
                 is_default: true,
+                // O banco tem `kind` NOT NULL DEFAULT 'rag_bot' e os dois ponteiros:
+                // sem eles o dublê descreveria uma linha que não existe, e a régua
+                // de `lib/ai/agents/no-ar.ts` — que falha FECHADA quando o select
+                // não trouxe `kind` — recusaria o agente pelo motivo errado.
+                kind: "rag_bot",
+                published_version_id: null,
+                archived_at: null,
               }
             : null; // ai_budgets sem linha = sem throttle; crm_leads sem lead
 
@@ -192,7 +204,12 @@ function makeAdminStub(confidenceThreshold: number) {
                     created_at: new Date().toISOString(),
                   },
                 ]
-              : [],
+              // A seleção de agente do worker legado é uma LISTA (ele filtra os
+              // candidatos pela régua de `lib/ai/agents/no-ar.ts` em vez de cortar
+              // com `.limit(1)` antes de saber quem serve). O dublê acompanha.
+              : table === "ai_agents"
+                ? (single ? [single] : [])
+                : [],
           error: null,
         }).then(resolve),
     };
@@ -210,7 +227,7 @@ function makeAdminStub(confidenceThreshold: number) {
     return chain;
   };
 
-  const rpc = () => Promise.resolve({ data: [], error: null });
+  const rpc = (name: string) => Promise.resolve({ data: name === "fn_service_boundary" ? SERVICE : [], error: null });
 
   return { stub: { from, rpc }, inserted };
 }
@@ -224,26 +241,12 @@ const eventRow = {
 let fetchOriginal: typeof globalThis.fetch;
 
 /** Instala o stub e devolve o registro de inserts para asserção. */
-function prepararWorker(confidenceThreshold: number): LinhaInserida[] {
-  const { stub, inserted } = makeAdminStub(confidenceThreshold);
+function prepararWorker(): LinhaInserida[] {
+  const { stub, inserted } = makeAdminStub();
   vi.mocked(createAdminClient).mockReturnValue(
     stub as unknown as ReturnType<typeof createAdminClient>,
   );
   return inserted;
-}
-
-function mensagemOutbound(inserted: LinhaInserida[]): Record<string, unknown> {
-  const linhas = inserted.filter(
-    (i) => i.table === "messages" && i.row["direction"] === "outbound",
-  );
-  // Anti-vacuidade: se o pipeline desviou antes do insert, não há o que
-  // asseverar e o teste passaria à toa.
-  expect(
-    linhas.length,
-    `nenhum insert outbound em messages — o pipeline não chegou a persistAndDispatch; ` +
-      `inserts vistos: ${JSON.stringify(inserted.map((i) => i.table))}`,
-  ).toBe(1);
-  return linhas[0]!.row;
 }
 
 beforeEach(() => {
@@ -278,70 +281,13 @@ describe("ai-response-worker — a linha outbound cabe na constraint de sent_via
     expect(SENT_VIA_PERMITIDOS).not.toContain("bot");
   });
 
-  it("caminho normal: persiste com sent_via aceito pelo banco e despacha", async () => {
-    const inserted = prepararWorker(0); // threshold 0 ⇒ G3 não dispara
+  it("o worker legado skipa antes do G3 e não cria rascunho/outbound", async () => {
+    const inserted = prepararWorker();
     const result = await processMessageReceived(eventRow);
-
-    const row = mensagemOutbound(inserted);
+    expect(result).toMatchObject({ status: "skipped", reason: "agent_inactive_or_missing" });
+    expect(inserted.filter((i) => i.table === "messages" && i.row.direction === "outbound")).toEqual([]);
     expect(
-      SENT_VIA_PERMITIDOS,
-      `sent_via=${JSON.stringify(row["sent_via"])} não está em messages_sent_via_check`,
-    ).toContain(row["sent_via"]);
-
-    expect(
-      result.status,
-      `reason: ${result.reason ?? "-"} | detail: ${result.detail ?? "(vazio)"}`,
-    ).toBe("sent_to_dispatch");
-    expect(result.outbound_message_id).toBe(OUTBOUND_ID);
-  });
-
-  it("caminho de handoff G3: o rascunho do bot também cabe na constraint", async () => {
-    // O segundo call site de persistAndDispatch (skipDispatch: true). Sem RAG a
-    // confiança é 0, então threshold 0.5 força o desvio por baixa confiança.
-    const inserted = prepararWorker(0.5);
-    const result = await processMessageReceived(eventRow);
-
-    const row = mensagemOutbound(inserted);
-    expect(
-      SENT_VIA_PERMITIDOS,
-      `sent_via=${JSON.stringify(row["sent_via"])} não está em messages_sent_via_check`,
-    ).toContain(row["sent_via"]);
-
-    expect(result.status).toBe("skipped");
-    expect(result.reason).toBe("handoff_g3_low_confidence");
-  });
-
-  it("o defeito, explicitado: sent_via fora do vocabulário derruba o envio", async () => {
-    // Prova que a asserção acima tem dente — que o `sent_to_dispatch` do
-    // primeiro caso vem de o valor ser válido, e não de o stub aceitar tudo.
-    const { stub, inserted } = makeAdminStub(0);
-    const comValorInvalido = {
-      ...stub,
-      from: (table: string) => {
-        const chain = stub.from(table);
-        if (table !== "messages") return chain;
-        return new Proxy(chain, {
-          get: (alvo, prop) =>
-            prop === "insert"
-              ? (row: Record<string, unknown>) =>
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  (alvo as any).insert({ ...row, sent_via: "bot" })
-              : // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                (alvo as any)[prop],
-        });
-      },
-    };
-    vi.mocked(createAdminClient).mockReturnValue(
-      comValorInvalido as unknown as ReturnType<typeof createAdminClient>,
-    );
-
-    const result = await processMessageReceived(eventRow);
-
-    expect(mensagemOutbound(inserted)["sent_via"]).toBe("bot");
-    // O worker transforma o erro do banco em throw; o handler do dispatcher
-    // captura e devolve status "error", que o drain converte em retentativa.
-    expect(result.status).toBe("error");
-    expect(result.detail).toMatch(/outbound_insert_failed/);
-    expect(result.detail).toMatch(/messages_sent_via_check/);
+      inserted.filter((i) => i.table === "event_log" && i.row.event_type === "message.send_requested"),
+    ).toEqual([]);
   });
 });

@@ -1,5 +1,7 @@
 "use client";
 
+import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
+
 /**
  * A tela de execuções de IA.
  *
@@ -13,11 +15,14 @@
  * decisão de desenho mais importante aqui — invertê-la faz a tela abrir com
  * jargão e devolve ao operador o trabalho de adivinhação que ela veio acabar.
  */
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { useT } from "@/hooks/i18n/useT";
+import { PROVEDOR_DO_JEV } from "@/lib/ai/decisao/credencial";
 
 /**
  * O MESMO formato da tela de Uso — as duas leem `llm_calls.cost_cents`, que é
@@ -26,10 +31,11 @@ import { Card } from "@/components/ui/card";
 const usd = new Intl.NumberFormat("pt-BR", {
   style: "currency",
   currency: "USD",
-  // 4 casas porque uma execução isolada custa fração de centavo, e arredondar
-  // para 2 mostraria "R$ 0,00" para todas elas — o zero que não é zero.
+  // 6 casas porque uma execução isolada custa fração de centavo, e arredondar
+  // mostraria "US$ 0,00" — o zero que não é zero. Com 4, era o caso de TODA
+  // medição do Jev (~US$ 0,000016); o cartão dele já usava 6.
   minimumFractionDigits: 2,
-  maximumFractionDigits: 4,
+  maximumFractionDigits: 6,
 });
 
 interface Execucao {
@@ -37,6 +43,7 @@ interface Execucao {
   purpose: string;
   pontoRotulo: string;
   provider: string;
+  provedorRotulo: string;
   model: string;
   status: string;
   error_code: string | null;
@@ -59,36 +66,49 @@ interface Resumo {
 }
 
 export function ExecucoesDeIa() {
+  const tagDoIdioma = useTagDeIdioma();
+  const t = useT();
   const [execucoes, setExecucoes] = useState<Execucao[] | null>(null);
   const [resumo, setResumo] = useState<Resumo | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [soErros, setSoErros] = useState(false);
+  // O provedor mora na URL, e não em estado: é por ela que o cartão do Jev
+  // traz a pessoa já filtrada ("Ver as decisões do Jev").
+  const router = useRouter();
+  const pathname = usePathname();
+  const provider = useSearchParams().get("provider");
+  const soOJev = provider === PROVEDOR_DO_JEV;
 
   const carregar = useCallback(async () => {
     // Mesmo tratamento do painel de provedores, e pela mesma razão medida lá:
     // sem ele, uma resposta não-JSON prende a tela em "Carregando…" sem nada
     // explicando — a falha muda que estas telas existem para acabar.
     try {
-      const res = await fetch(`/api/v1/ai/runs${soErros ? "?status=erro" : ""}`);
+      const busca = new URLSearchParams();
+      if (soErros) busca.set("status", "erro");
+      if (provider) busca.set("provider", provider);
+      const res = await fetch(`/api/v1/ai/runs${busca.toString() ? `?${busca}` : ""}`);
       const texto = await res.text();
       let json: { data?: { execucoes: Execucao[]; resumo: Resumo }; error?: { message?: string } };
       try {
         json = JSON.parse(texto);
       } catch {
-        setErro(`resposta inesperada do servidor (${res.status}): ${texto.slice(0, 200)}`);
+        setErro(`${t("resposta inesperada do servidor")} (${res.status}): ${texto.slice(0, 200)}`);
         return;
       }
       if (!res.ok) {
-        setErro(json?.error?.message ?? `não consegui carregar (${res.status})`);
+        setErro(
+          json?.error?.message ? t(json.error.message) : `${t("não consegui carregar")} (${res.status})`,
+        );
         return;
       }
       setErro(null);
       setExecucoes(json.data!.execucoes);
       setResumo(json.data!.resumo);
     } catch (e) {
-      setErro(e instanceof Error ? e.message : "não consegui falar com o servidor");
+      setErro(e instanceof Error ? e.message : t("não consegui falar com o servidor"));
     }
-  }, [soErros]);
+  }, [soErros, provider, t]);
 
   useEffect(() => {
     void carregar();
@@ -98,10 +118,10 @@ export function ExecucoesDeIa() {
     return (
       <div className="p-6">
         <Card className="border-destructive/40 p-6">
-          <h2 className="font-medium">Não consegui carregar as execuções</h2>
+          <h2 className="font-medium">{t("Não consegui carregar as execuções")}</h2>
           <p className="mt-2 text-sm text-muted-foreground">{erro}</p>
           <Button className="mt-4" variant="outline" onClick={() => void carregar()}>
-            Tentar de novo
+            {t("Tentar de novo")}
           </Button>
         </Card>
       </div>
@@ -109,16 +129,17 @@ export function ExecucoesDeIa() {
   }
 
   if (!execucoes || !resumo) {
-    return <div className="p-6 text-sm text-muted-foreground">Carregando…</div>;
+    return <div className="p-6 text-sm text-muted-foreground">{t("Carregando…")}</div>;
   }
 
   return (
     <div className="mx-auto w-full max-w-5xl p-6" data-testid="execucoes-de-ia">
       <header className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Execuções de IA</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("Execuções de IA")}</h1>
         <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-          Tudo que a inteligência artificial fez por aqui — e, quando algo falhou, o que
-          aconteceu e o que fazer.
+          {t(
+            "Tudo que a inteligência artificial fez por aqui — e, quando algo falhou, o que aconteceu e o que fazer.",
+          )}
         </p>
       </header>
 
@@ -127,14 +148,14 @@ export function ExecucoesDeIa() {
         {resumo.erros === 0 ? (
           <p className="text-sm">
             <span className="font-medium text-emerald-600 dark:text-emerald-500">
-              Nenhuma falha
+              {t("Nenhuma falha")}
             </span>{" "}
-            nas últimas {resumo.total} execuções.
+            {t("nas últimas")} {resumo.total} {t("execuções.")}
           </p>
         ) : (
           <div>
             <p className="text-sm font-medium text-destructive" data-testid="tem-falhas">
-              {resumo.erros} de {resumo.total} execuções falharam.
+              {resumo.erros} {t("de")} {resumo.total} {t("execuções falharam.")}
             </p>
             <ul className="mt-3 space-y-2">
               {resumo.porCodigo.map((c) => (
@@ -142,7 +163,7 @@ export function ExecucoesDeIa() {
                   <Badge variant="outline" className="mr-2 font-mono text-xs">
                     {c.quantas}×
                   </Badge>
-                  {c.oQueFazer ?? c.codigo}
+                  {c.oQueFazer ? t(c.oQueFazer) : c.codigo}
                 </li>
               ))}
             </ul>
@@ -150,22 +171,38 @@ export function ExecucoesDeIa() {
         )}
       </Card>
 
-      <div className="mb-3">
+      <div className="mb-3 flex flex-wrap gap-2">
         <Button
           size="sm"
           variant={soErros ? "default" : "outline"}
           onClick={() => setSoErros((v) => !v)}
           data-testid="filtro-erros"
         >
-          {soErros ? "Mostrando só as falhas" : "Ver só as falhas"}
+          {soErros ? t("Mostrando só as falhas") : t("Ver só as falhas")}
         </Button>
+        {/* Só onde o Jev existe: numa instalação sem ele, o filtro seria ruído. */}
+        {(soOJev || execucoes.some((e) => e.provider === PROVEDOR_DO_JEV)) && (
+          <Button
+            size="sm"
+            variant={soOJev ? "default" : "outline"}
+            aria-pressed={soOJev}
+            onClick={() =>
+              router.replace(soOJev ? pathname : `${pathname}?provider=${PROVEDOR_DO_JEV}`)
+            }
+            data-testid="filtro-jev"
+          >
+            {soOJev ? t("Mostrando só o Jev") : t("Só o Jev")}
+          </Button>
+        )}
       </div>
 
       {execucoes.length === 0 ? (
         <Card className="p-6 text-sm text-muted-foreground" data-testid="lista-vazia">
           {soErros
-            ? "Nenhuma falha registrada."
-            : "Nenhuma execução ainda. Assim que o agente atender alguém, aparece aqui."}
+            ? t("Nenhuma falha registrada.")
+            : soOJev
+              ? t("O Jev ainda não mediu nenhuma mensagem.")
+              : t("Nenhuma execução ainda. Assim que o agente atender alguém, aparece aqui.")}
         </Card>
       ) : (
         <div className="space-y-2">
@@ -177,15 +214,15 @@ export function ExecucoesDeIa() {
             >
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <span className="font-medium">{e.pontoRotulo}</span>
+                  <span className="font-medium">{t(e.pontoRotulo)}</span>
                   {e.status === "erro" && (
                     <Badge variant="destructive" className="text-xs">
-                      falhou
+                      {t("falhou")}
                     </Badge>
                   )}
                 </div>
                 <span className="font-mono text-xs text-muted-foreground">
-                  {e.provider} · {e.model}
+                  {e.provedorRotulo} · {e.model}
                 </span>
               </div>
 
@@ -194,29 +231,29 @@ export function ExecucoesDeIa() {
                   {/* 1º: o que o CLIENTE viu. */}
                   {e.consequencia && (
                     <p data-testid="consequencia">
-                      <span className="font-medium">O que aconteceu:</span> {e.consequencia}
+                      <span className="font-medium">{t("O que aconteceu:")}</span> {t(e.consequencia)}
                     </p>
                   )}
                   {/* 2º: o que fazer. */}
                   {e.oQueFazer && (
                     <p className="text-muted-foreground" data-testid="o-que-fazer">
-                      <span className="font-medium">O que fazer:</span> {e.oQueFazer}
+                      <span className="font-medium">{t("O que fazer:")}</span> {t(e.oQueFazer)}
                     </p>
                   )}
                   {/* 3º: só então, o texto cru — para quem for investigar. */}
                   {e.error_message && (
                     <details className="text-xs text-muted-foreground">
-                      <summary className="cursor-pointer">Mensagem técnica do provedor</summary>
-                      <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words rounded bg-muted p-2">
+                      <summary className="cursor-pointer">{t("Mensagem técnica do provedor")}</summary>
+                      <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2">
                         {e.error_message}
-                        {e.http_status ? `\n(código ${e.http_status})` : ""}
+                        {e.http_status ? `\n(${t("código")} ${e.http_status})` : ""}
                       </pre>
                     </details>
                   )}
                 </div>
               ) : (
                 <p className="mt-2 text-xs text-muted-foreground">
-                  {e.input_tokens + e.output_tokens} tokens
+                  {e.input_tokens + e.output_tokens} {t("tokens")}
                   {e.latency_ms !== null ? ` · ${e.latency_ms} ms` : ""}
                   {/* `cost_cents` está em CENTAVOS: dividir por 100 dá REAIS, e o
                       rótulo dizia "centavos" — uma execução de 25 centavos
@@ -228,8 +265,8 @@ export function ExecucoesDeIa() {
               )}
 
               <p className="mt-2 text-xs text-muted-foreground">
-                {new Date(e.created_at).toLocaleString("pt-BR")}
-                {e.porQueEsteModelo ? ` · ${e.porQueEsteModelo}` : ""}
+                {new Date(e.created_at).toLocaleString(tagDoIdioma)}
+                {e.porQueEsteModelo ? ` · ${t(e.porQueEsteModelo)}` : ""}
               </p>
             </Card>
           ))}

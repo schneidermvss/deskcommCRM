@@ -22,11 +22,29 @@ const consultas: { platformAdmins: unknown; memberships: unknown } = {
   memberships: { data: [], error: null },
 };
 
-vi.mock("next/headers", () => ({ cookies: async () => ({ getAll: () => [], set: () => {} }) }));
+// `get` entrou junto com a cadeia de idioma (usuário → organização): o
+// resolvedor pergunta ao cookie qual organização está ativa. O dublê tinha
+// `getAll`/`set` e não `get` — menos completo que a API real, e o teste caía
+// por falta do dublê, não por defeito.
+vi.mock("next/headers", () => ({
+  cookies: async () => ({ get: () => undefined, getAll: () => [], set: () => {} }),
+}));
 vi.mock("next/navigation", () => ({ redirect: () => { throw new Error("redirect"); } }));
+
+/** A organização do acompanhamento administrativo, lida por id (sem membership). */
+const orgDoSuporte: { data: unknown } = { data: { timezone: "Europe/Lisbon", currency: "EUR", country: "PT" } };
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    from: () => {
+      const chain = { select: () => chain, eq: () => chain, maybeSingle: async () => orgDoSuporte };
+      return chain;
+    },
+  }),
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
+    rpc: async () => ({ data: null, error: null }),
     auth: {
       getUser: async () => ({
         data: { user: { id: "u1", email: "a@b.c", user_metadata: {} } },
@@ -39,7 +57,17 @@ vi.mock("@/lib/supabase/server", () => ({
       const chain = {
         select: () => chain,
         eq: () => chain,
-        is: () => (alvo === "platformAdmins" ? { maybeSingle: async () => resultado() } : resultado()),
+        // ⚠️ `is()` para memberships devolve o RESULTADO, e não a cadeia — o que
+        // fazia dele o terminal obrigatório. A consulta de memberships passou a
+        // ordenar (a lista decide qual organização fica ativa sem cookie, e sem
+        // `ORDER BY` "a primeira" é o que o Postgres devolver), então o terminal
+        // agora pode vir depois de `.order()`. O dublê precisa aceitar as duas
+        // formas — e é thenable, então `await` no fim resolve igual.
+        is: () =>
+          alvo === "platformAdmins"
+            ? { maybeSingle: async () => resultado() }
+            : { ...chain, then: chain.then },
+        order: () => ({ ...chain, then: chain.then }),
         maybeSingle: async () => resultado(),
         then: (r: (v: unknown) => unknown) => Promise.resolve(resultado()).then(r),
       };
@@ -48,7 +76,7 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-const { loadAuthUser } = await import("@/lib/auth/server");
+const { loadAuthUser, resolveActiveOrg } = await import("@/lib/auth/server");
 
 beforeEach(() => {
   consultas.platformAdmins = { data: null, error: null };
@@ -97,7 +125,89 @@ describe("loadAuthUser — falha de permissão não vira 'sem organização'", (
     };
     const u = await loadAuthUser();
     expect(u?.organizations).toEqual([
-      { organization_id: "o1", organization_name: "Acme", role: "admin" },
+      // `locale` e `timezone` são o idioma e o fuso padrão da ORGANIZAÇÃO, que
+      // entram na membership para quem resolve a sessão não precisar de uma
+      // segunda consulta — o idioma para a interface, o fuso para a Agenda abrir
+      // na semana de quem olha. Os dois vêm `null` aqui porque o dublê não
+      // devolve as colunas, e é isso que este caso fixa: quando a consulta não
+      // traz, a sessão recebe `null` em vez de `undefined` ou de um padrão
+      // inventado no meio do caminho.
+      {
+        organization_id: "o1",
+        organization_name: "Acme",
+        role: "admin",
+        locale: null,
+        timezone: null,
+        // Mesma carona, mesmo contrato: quando a consulta não traz, chega
+        // `null`, e não um padrão inventado no meio do caminho.
+        currency: null,
+        country: null,
+        // Status e tipo da suspensão da organização (spec da cobrança §4):
+        // mesma carona, mesmo contrato — sem a coluna, `null`.
+        org_status: null,
+        suspended_kind: null,
+        interface_settings: { preset: "completa" },
+      },
     ]);
+  });
+
+  it("traz status e tipo de suspensão da org e o scope do platform admin", async () => {
+    consultas.platformAdmins = { data: { user_id: "u1", scope: "support_readonly", revoked_at: null }, error: null };
+    consultas.memberships = {
+      data: [{ organization_id: "o1", role: "admin", organizations: { display_name: "Acme", status: "suspended", suspended_kind: "cobranca" } }],
+      error: null,
+    };
+    const u = await loadAuthUser();
+    expect(u?.is_platform_admin).toBe(true);
+    expect(u?.platform_admin_scope).toBe("support_readonly");
+    expect(u?.organizations[0]).toMatchObject({ org_status: "suspended", suspended_kind: "cobranca" });
+  });
+
+  /**
+   * O FIO ATÉ A TELA. `ActiveOrg` é o que o cliente enxerga (`useActiveOrg`), e
+   * é de lá que o rótulo do valor e o documento do contato saem. Sem estas duas
+   * colunas atravessando, as telas caem no padrão e voltam a dizer `R$` e `CPF`
+   * dentro de uma empresa em euro — sem nada ficar vermelho.
+   */
+  it("a organização ATIVA leva a moeda e o país até o cliente", async () => {
+    consultas.memberships = {
+      data: [
+        {
+          organization_id: "o1",
+          role: "admin",
+          organizations: {
+            display_name: "Stolia",
+            locale: "pt-BR",
+            timezone: "Europe/Lisbon",
+            currency: "EUR",
+            country: "PT",
+            status: "active",
+          },
+        },
+      ],
+      error: null,
+    };
+    const u = await loadAuthUser();
+    const ativa = await resolveActiveOrg(u!);
+    expect(ativa).toMatchObject({ orgId: "o1", currency: "EUR", country: "PT" });
+  });
+
+  /**
+   * Acompanhamento administrativo não tem membership, e este caminho devolvia a
+   * organização PELADA — sem fuso, sem moeda e sem país. Quem entra para apoiar
+   * uma empresa em euro via `R$` na tela do negócio.
+   */
+  it("no acompanhamento administrativo a organização também chega completa", async () => {
+    const ativa = await resolveActiveOrg({
+      id: "u1",
+      support: { status: "active", organization_id: "o9", name: "Stolia", access_mode: "full" },
+    } as never);
+    expect(ativa).toMatchObject({
+      orgId: "o9",
+      role: "admin",
+      timezone: "Europe/Lisbon",
+      currency: "EUR",
+      country: "PT",
+    });
   });
 });

@@ -1,3 +1,5 @@
+"use client";
+import { useT } from "@/hooks/i18n/useT";
 import { DownloadSimple, FileText } from "@/lib/ui/icons";
 import { cn } from "@/lib/utils";
 
@@ -9,17 +11,20 @@ interface Props {
   sizeBytes: number | null;
   storagePath: string | null;
   isOutbound: boolean;
+  /** Fonte alternativa para mídia de NOTA interna (#1863, F3) — ver ImageMedia. */
+  src?: string;
 }
 
 /** Card de documento: rótulo (PDF/MP4/…), tamanho e download. */
-export function DocumentCard({ messageId, mime, sizeBytes, storagePath, isOutbound }: Props) {
+export function DocumentCard({ messageId, mime, sizeBytes, storagePath, isOutbound, src }: Props) {
+  const t = useT();
   const label = mediaFileLabel(mime, storagePath);
   return (
     <a
-      href={mediaSrc(messageId)}
+      href={src ?? mediaSrc(messageId)}
       target="_blank"
       rel="noreferrer"
-      aria-label={`Baixar ${label} (${formatBytes(sizeBytes)})`}
+      aria-label={`${t("Baixar")} ${label} (${formatBytes(sizeBytes)})`}
       className={cn(
         "flex w-60 items-center gap-3 rounded-lg p-2 transition-colors",
         isOutbound

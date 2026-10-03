@@ -3,9 +3,13 @@ import { mapInboundPayload, normalizePhoneBR, verifyInboundSignature } from "@/l
 import { createHmac } from "node:crypto";
 
 describe("normalizePhoneBR", () => {
-  it("já em E.164 passa direto", () => expect(normalizePhoneBR("+5511998765432")).toBe("+5511998765432"));
+  it("já em E.164 com o nono passa direto", () => expect(normalizePhoneBR("+5511998765432")).toBe("+5511998765432"));
   it("DDD+numero BR ganha +55", () => expect(normalizePhoneBR("11 99876-5432")).toBe("+5511998765432"));
   it("com 55 na frente sem +", () => expect(normalizePhoneBR("5511998765432")).toBe("+5511998765432"));
+  it("celular antigo sem o nono ganha o 9", () => {
+    expect(normalizePhoneBR("+553284793302")).toBe("+5532984793302");
+    expect(normalizePhoneBR("3284793302")).toBe("+5532984793302");
+  });
   it("fixo BR 10 dígitos", () => expect(normalizePhoneBR("1133334444")).toBe("+551133334444"));
   it("lixo → null", () => expect(normalizePhoneBR("abc")).toBeNull());
   it("vazio/não-string → null", () => {
@@ -38,6 +42,30 @@ describe("mapInboundPayload", () => {
   it("valores não-string são stringificados em custom_fields; objetos aninhados descartados", () => {
     const m = mapInboundPayload({ nome: "Ana", idade: 30, nested: { a: 1 } });
     expect(m.custom_fields).toEqual({ idade: "30" });
+  });
+});
+
+describe("ruído da plataforma do formulário", () => {
+  // Envio real do JetFormBuilder (2026-09-30), só as chaves — nome/telefone/e-mail
+  // chegam por chave de topo e já eram reconhecidos; o lixo interno é que entrava
+  // no card do lead.
+  const jetFormBuilder = {
+    name: "Maria Teste",
+    phone: "11988887777",
+    email: "maria.teste@example.com",
+    message: "teste",
+    __refer: "https://site.example/testes/",
+    __form_id: "26981",
+    __is_ajax: "1",
+  };
+  it("não vira campo do lead", () => {
+    const m = mapInboundPayload(jetFormBuilder);
+    expect(m).toMatchObject({ name: "Maria Teste", phone: "+5511988887777", email: "maria.teste@example.com" });
+    expect(m.custom_fields).toEqual({ message: "teste" });
+  });
+  it("campo próprio que começa com _ NÃO é descartado", () => {
+    const m = mapInboundPayload({ nome: "Ana", _origem: "instagram", __meu_campo: "x" });
+    expect(m.custom_fields).toEqual({ _origem: "instagram", __meu_campo: "x" });
   });
 });
 

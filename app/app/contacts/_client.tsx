@@ -1,22 +1,31 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Plus, MagnifyingGlass, UploadSimple } from "@/lib/ui/icons";
+import { useT } from "@/hooks/i18n/useT";
+import { Plus, MagnifyingGlass, UploadSimple, UsersThree } from "@/lib/ui/icons";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useContactList } from "@/hooks/contacts/useContactList";
 import { ContactsTable } from "@/components/contacts/ContactsTable";
+import { PontoDaEtiqueta } from "@/components/tags/PontoDaEtiqueta";
 import { NewContactDialog } from "@/components/contacts/NewContactDialog";
 import { ImportContactsDialog } from "@/components/contacts/ImportContactsDialog";
+import { TAG_DE_CLIENTE } from "@/lib/contacts/cliente";
+import { type ModoDeEtiqueta } from "@/lib/inbox/marcador-da-conversa";
+import { useActiveOrg } from "@/hooks/auth/AuthProvider";
+import { MergeDialog } from "@/components/contacts/MergeDialog";
 import { EmptyContacts } from "@/components/empty";
 import type { ContactOrderBy } from "@/lib/schemas/contacts";
 
@@ -24,31 +33,55 @@ const SOURCE_OPTIONS = [
   { value: undefined, label: "Todas as origens" },
   { value: "manual", label: "Manual" },
   { value: "whatsapp", label: "WhatsApp" },
+  { value: "site", label: "Site (landing page)" },
   { value: "nuvemshop", label: "Nuvemshop" },
   { value: "import_csv", label: "Importado (CSV)" },
+  // Os dois valores que a atribuição de anúncio grava em `contacts.source`
+  // (`PlataformaDeAnuncio` em lib/leads/atribuicao-de-anuncio.ts). Sem eles, o
+  // contato que veio de um clique em anúncio existe no banco e não é
+  // alcançável por nenhum filtro desta tela. O handler aceita qualquer valor
+  // (`_handler.ts:167` faz `eq("source", q.source)`), então a lista é a única
+  // porta — e ela estava incompleta desde que a atribuição passou a existir.
+  { value: "meta_ads", label: "Anúncio da Meta" },
+  { value: "google_ads", label: "Anúncio do Google" },
 ];
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 
 export function ContactsListClient() {
+  const t = useT();
+  const clientesLigado = useActiveOrg()?.cliente_pela_agenda === true;
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [tag, setTag] = useState<string | undefined>(undefined);
+  // VÁRIAS etiquetas com E/OU (#1274). O estado é a LISTA, e uma etiqueta só é
+  // a lista de um — o que faz "nenhuma escolha" e "vip escolhida" passarem pelo
+  // mesmo caminho, e impede a segunda forma de nascer daqui.
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagMode, setTagMode] = useState<ModoDeEtiqueta | undefined>(undefined);
   const [source, setSource] = useState<string | undefined>(undefined);
   const [orderBy, setOrderBy] = useState<ContactOrderBy>("last_activity_at");
   const [orderDir, setOrderDir] = useState<"asc" | "desc">("desc");
   const [limit, setLimit] = useState<number>(25);
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [duplicadosOpen, setDuplicadosOpen] = useState(false);
 
   useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput), 250);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setSearch(searchInput), 250);
+    return () => clearTimeout(timer);
   }, [searchInput]);
 
   const filters = useMemo(
-    () => ({ search, tag, source, order_by: orderBy, order_dir: orderDir, limit }),
-    [search, tag, source, orderBy, orderDir, limit],
+    () => ({
+      search,
+      tag: tags.length > 0 ? tags : undefined,
+      tagMode,
+      source,
+      order_by: orderBy,
+      order_dir: orderDir,
+      limit,
+    }),
+    [search, tags, tagMode, source, orderBy, orderDir, limit],
   );
   const q = useContactList(filters);
 
@@ -59,9 +92,17 @@ export function ContactsListClient() {
 
   const tagOptions = useMemo(() => {
     const set = new Set<string>();
-    for (const c of allContacts) for (const t of c.tags) set.add(t);
+    for (const c of allContacts) for (const tag of c.tags) set.add(tag);
+    // `cliente` na lista mesmo que nenhum contato da página carregada a tenha —
+    // COM A REGRA LIGADA. As demais opções saem do que já foi paginado — o que
+    // basta para etiqueta que a equipe criou e usa em bloco, e falha justamente
+    // para esta, que o sistema escreve sozinho e cujo primeiro uso é "filtrar
+    // quem já é cliente" numa base grande, onde a primeira página pode não ter
+    // nenhum. Desligada, a opção fixa ofereceria um filtro de uma regra que não
+    // roda; quem já tem a etiqueta continua aparecendo pela linha de cima.
+    if (clientesLigado) set.add(TAG_DE_CLIENTE);
     return Array.from(set).sort();
-  }, [allContacts]);
+  }, [allContacts, clientesLigado]);
 
   const handleSort = useCallback(
     (column: ContactOrderBy) => {
@@ -79,9 +120,9 @@ export function ContactsListClient() {
     <div className="space-y-4 p-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight">Contatos</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{t("Contatos")}</h1>
           <p className="text-sm text-muted-foreground">
-            Customer 360 — busque, filtre e gerencie contatos.
+            {t("Customer 360 — busque, filtre e gerencie contatos.")}
           </p>
         </div>
         {/*
@@ -90,13 +131,23 @@ export function ContactsListClient() {
           uma linha de dois botões sem isso comprime os rótulos.
         */}
         <div className="flex shrink-0 items-center gap-2">
+          {/*
+            A porta do recurso de duplicados fica AQUI, na tela que já existe, e
+            não num item de menu novo: quem descobre que tem contato repetido
+            descobre olhando a lista, e a barra lateral não precisa crescer para
+            um trabalho que se faz de vez em quando.
+          */}
+          <Button variant="outline" onClick={() => setDuplicadosOpen(true)}>
+            <UsersThree size={16} weight="bold" aria-hidden />
+            <span>{t("Duplicados")}</span>
+          </Button>
           <Button variant="outline" onClick={() => setImportOpen(true)}>
             <UploadSimple size={16} weight="bold" aria-hidden />
-            <span>Importar CSV</span>
+            <span>{t("Importar CSV")}</span>
           </Button>
           <Button onClick={() => setCreateOpen(true)}>
             <Plus size={16} weight="bold" aria-hidden />
-            <span>Novo contato</span>
+            <span>{t("Novo contato")}</span>
           </Button>
         </div>
       </header>
@@ -110,7 +161,7 @@ export function ContactsListClient() {
           />
           <Input
             type="search"
-            placeholder="Buscar por nome, email ou telefone…"
+            placeholder={t("Buscar por nome, email ou telefone…")}
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             className="h-9 w-full pl-8"
@@ -120,17 +171,67 @@ export function ContactsListClient() {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm" disabled={tagOptions.length === 0}>
-              {tag ? `Tag: ${tag}` : "Tag: todas"}
+              {tags[0] ? <PontoDaEtiqueta tag={tags[0]} className="mr-2" /> : null}
+              {/* Resumo, e não a lista inteira: o gatilho tem a largura do filtro de
+                  origem ao lado. Uma etiqueta mostra o nome; duas mostram a
+                  primeira e o resto em contagem. */}
+              {tags.length === 0
+                ? `${t("Tag")}: ${t("todas")}`
+                : tags.length === 1
+                  ? `${t("Tag")}: ${tags[0]}`
+                  : `${t("Tag")}: ${tags[0]} +${tags.length - 1}`}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
-            <DropdownMenuLabel>Tag</DropdownMenuLabel>
+            <DropdownMenuLabel>{t("Tag")}</DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => setTag(undefined)}>Todas</DropdownMenuItem>
-            {tagOptions.map((t) => (
-              <DropdownMenuItem key={t} onClick={() => setTag(t)}>
-                {t}
-              </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                setTags([]);
+                setTagMode(undefined);
+              }}
+            >
+              {t("Todas")}
+            </DropdownMenuItem>
+            {/* O E/OU so aparece com DUAS etiquetas: com uma so o parametro nao
+                muda o resultado, e um controle que nao muda nada e pior do que
+                nenhum. */}
+            {tags.length > 1 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuRadioGroup
+                  value={tagMode === "ou" ? "ou" : "e"}
+                  onValueChange={(modo) => setTagMode(modo === "ou" ? "ou" : undefined)}
+                >
+                  <DropdownMenuRadioItem value="e">{t("Todas (E)")}</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="ou">{t("Qualquer uma (OU)")}</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </>
+            )}
+            <DropdownMenuSeparator />
+            {/* `DropdownMenuCheckboxItem` marca e NAO fecha o menu — e o
+                `onSelect` com `preventDefault` trava esse comportamento, porque
+                o item de checkbox fecha por padrao. Sem isso, escolher a segunda
+                etiqueta exigiria reabrir o menu. */}
+            {tagOptions.map((tagOption) => (
+              <DropdownMenuCheckboxItem
+                key={tagOption}
+                checked={tags.includes(tagOption)}
+                onCheckedChange={() => {
+                  const escolhida = tags.includes(tagOption);
+                  const proximas = escolhida
+                    ? tags.filter((et) => et !== tagOption)
+                    : [...tags, tagOption];
+                  setTags(proximas);
+                  // O modo so faz sentido com DUAS: com uma so ele nao muda o
+                  // resultado, e o `&modo=ou` na URL seria ruido.
+                  setTagMode(proximas.length > 1 ? tagMode : undefined);
+                }}
+                onSelect={(e) => e.preventDefault()}
+              >
+                <PontoDaEtiqueta tag={tagOption} className="mr-2" />
+                {tagOption}
+              </DropdownMenuCheckboxItem>
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
@@ -138,13 +239,13 @@ export function ContactsListClient() {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm">
-              {SOURCE_OPTIONS.find((s) => s.value === source)?.label ?? "Origem"}
+              {t(SOURCE_OPTIONS.find((s) => s.value === source)?.label ?? "Origem")}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
             {SOURCE_OPTIONS.map((s) => (
               <DropdownMenuItem key={s.label} onClick={() => setSource(s.value)}>
-                {s.label}
+                {t(s.label)}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
@@ -153,11 +254,11 @@ export function ContactsListClient() {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm">
-              {limit} por página
+              {limit} {t("por página")}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
-            <DropdownMenuLabel>Itens por página</DropdownMenuLabel>
+            <DropdownMenuLabel>{t("Itens por página")}</DropdownMenuLabel>
             <DropdownMenuSeparator />
             {PAGE_SIZE_OPTIONS.map((n) => (
               <DropdownMenuItem key={n} onClick={() => setLimit(n)}>
@@ -167,18 +268,19 @@ export function ContactsListClient() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {(search || tag || source) && (
+        {(search || tags.length > 0 || source) && (
           <Button
             variant="ghost"
             size="sm"
             onClick={() => {
               setSearchInput("");
               setSearch("");
-              setTag(undefined);
+              setTags([]);
+              setTagMode(undefined);
               setSource(undefined);
             }}
           >
-            Limpar filtros
+            {t("Limpar filtros")}
           </Button>
         )}
       </div>
@@ -191,14 +293,14 @@ export function ContactsListClient() {
         </div>
       ) : q.isError ? (
         <Card className="p-6 text-center">
-          <p className="text-sm text-error-fg">Erro ao carregar contatos.</p>
+          <p className="text-sm text-error-fg">{t("Erro ao carregar contatos.")}</p>
           <Button
             size="sm"
             variant="outline"
             className="mt-2"
             onClick={() => q.refetch()}
           >
-            Tentar novamente
+            {t("Tentar novamente")}
           </Button>
         </Card>
       ) : allContacts.length === 0 ? (
@@ -217,8 +319,8 @@ export function ContactsListClient() {
           </Card>
           <div className="flex flex-col items-center gap-2 sm:flex-row sm:justify-between">
             <p className="text-sm text-muted-foreground">
-              {allContacts.length} contato{allContacts.length === 1 ? "" : "s"}
-              {q.hasNextPage ? " carregados — há mais resultados" : ""}
+              {allContacts.length} {allContacts.length === 1 ? t("contato") : t("contatos")}
+              {q.hasNextPage ? ` ${t("carregados — há mais resultados")}` : ""}
             </p>
             {q.hasNextPage && (
               <Button
@@ -227,7 +329,7 @@ export function ContactsListClient() {
                 onClick={() => q.fetchNextPage()}
                 disabled={q.isFetchingNextPage}
               >
-                {q.isFetchingNextPage ? "Carregando…" : "Carregar mais"}
+                {q.isFetchingNextPage ? t("Carregando…") : t("Carregar mais")}
               </Button>
             )}
           </div>
@@ -236,6 +338,7 @@ export function ContactsListClient() {
 
       <NewContactDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ImportContactsDialog open={importOpen} onOpenChange={setImportOpen} />
+      <MergeDialog open={duplicadosOpen} onOpenChange={setDuplicadosOpen} />
     </div>
   );
 }

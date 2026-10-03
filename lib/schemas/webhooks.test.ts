@@ -61,6 +61,7 @@ describe("createAutomationRuleSchema", () => {
       { type: "add_tag", config: { tags: ["vip"] } },
       { type: "assign_owner", config: { user_id: UUID } },
       { type: "call_webhook", config: { url: "https://example.com/hook" } },
+      { type: "start_message_flow", config: { flow_pointer_id: UUID } },
     ];
     for (const action of actionCases) {
       const r = createAutomationRuleSchema.safeParse({ ...base, actions: [action] });
@@ -82,6 +83,15 @@ describe("createAutomationRuleSchema", () => {
       name: "Regra",
       trigger_event: "lead.created",
       actions: [],
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it("rejects start_message_flow without uuid pointer", () => {
+    const r = createAutomationRuleSchema.safeParse({
+      name: "Regra",
+      trigger_event: "lead.created",
+      actions: [{ type: "start_message_flow", config: { flow_pointer_id: "not-uuid" } }],
     });
     expect(r.success).toBe(false);
   });
@@ -125,5 +135,41 @@ describe("updateAutomationRuleSchema", () => {
   it("accepts {is_active: true} alone", () => {
     const r = updateAutomationRuleSchema.safeParse({ is_active: true });
     expect(r.success).toBe(true);
+  });
+});
+
+
+describe("#1612: gatilhos de desfecho e o opt-in do responsável", () => {
+  it("aceita appointment.completed e appointment.no_show como trigger_event", () => {
+    for (const trigger_event of ["appointment.completed", "appointment.no_show"] as const) {
+      const r = createAutomationRuleSchema.safeParse({
+        name: "Aviso de desfecho",
+        trigger_event,
+        actions: [{ type: "call_webhook", config: { url: "https://example.com/hook" } }],
+      });
+      expect(r.success, trigger_event).toBe(true);
+    }
+  });
+
+  it("call_webhook aceita include_owner booleano", () => {
+    const r = createAutomationRuleSchema.safeParse({
+      name: "Regra",
+      trigger_event: "appointment.created",
+      actions: [
+        { type: "call_webhook", config: { url: "https://example.com/hook", include_owner: true } },
+      ],
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("recusa include_owner que não é booleano: opt-in malformado não é opt-in", () => {
+    const r = createAutomationRuleSchema.safeParse({
+      name: "Regra",
+      trigger_event: "appointment.created",
+      actions: [
+        { type: "call_webhook", config: { url: "https://example.com/hook", include_owner: "sim" } },
+      ],
+    });
+    expect(r.success).toBe(false);
   });
 });

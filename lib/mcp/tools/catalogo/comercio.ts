@@ -22,12 +22,15 @@ export const TOOLS_COMERCIO = declararTools([
     category: "read",
     rotulo: "Procurar produto na loja",
     explicacao:
-      "Procura um produto pelo nome e devolve preço e quantidade em estoque, para o assistente responder com o dado da loja em vez de estimar.",
+      "Procura um produto no catálogo da loja e devolve o preço exato e o que está disponível, para o assistente responder com o valor cadastrado em vez de estimar.",
     oQueToca: "Catálogo da loja",
     risco: "seguro",
     pacotes: ["vender", "atender"],
   },
   {
+    // Painel interno AETRIX (cliente Nilson Veículos) — não é feature do
+    // produto DeskcommCRM em si. Live-query no Sanity CMS do site, não na
+    // tabela nuvemshop_products.
     name: "crm_search_vehicles",
     category: "read",
     rotulo: "Procurar veículo no estoque",
@@ -36,6 +39,28 @@ export const TOOLS_COMERCIO = declararTools([
     oQueToca: "Estoque de veículos",
     risco: "seguro",
     pacotes: ["vender", "atender"],
+  },
+  {
+    name: "crm_draft_proposal",
+    category: "write",
+    rotulo: "Rascunhar proposta comercial",
+    explicacao:
+      "Cria um rascunho de proposta a partir do que foi combinado na conversa — uma pessoa sempre revisa e envia depois, e pode editar antes de despachar.",
+    oQueToca: "Propostas comerciais",
+    risco: "atencao",
+    pacotes: ["vender"],
+    capacidade: "propostas",
+  },
+  {
+    name: "crm_preparar_proposta",
+    category: "read",
+    rotulo: "Preparar a proposta com o cliente",
+    explicacao:
+      "Mostra os modelos de proposta da empresa, diz o que perguntar ao cliente antes de rascunhar e lista os campos que o modelo escolhido pede, para a proposta nascer completa.",
+    oQueToca: "Propostas comerciais",
+    risco: "seguro",
+    pacotes: ["vender"],
+    capacidade: "propostas",
   },
   {
     name: "crm_list_privacy_requests",

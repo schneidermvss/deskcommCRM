@@ -38,6 +38,7 @@ import type { FetchedMedia } from "@/lib/messaging/media/types";
 
 import { resolveZernioCreds } from "../zernio/credentials";
 import { zernioTemplateOps } from "../zernio/templates";
+import { zernioReportConversion } from "../zernio/conversoes";
 import { assertDestinoResolvidoSeguro } from "@/lib/automation/outbound-ip";
 import { assertSafeOutboundUrl } from "@/lib/automation/outbound-url";
 import { zernioMediaFetchInit } from "../zernio/webhook";
@@ -203,6 +204,7 @@ export const zernioAdapter: ChannelAdapter = {
       ...(envelope.replyToExternalId ? { replyTo: envelope.replyToExternalId } : {}),
     };
 
+    await envelope.beforeSend?.();
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -247,6 +249,7 @@ export const zernioAdapter: ChannelAdapter = {
    * parâmetro virar o primeiro na hora em que alguém renomeasse uma chave.
    */
   async sendTemplate(input: ChannelTenantScope & {
+    beforeSend?: () => Promise<void>;
     sessionRef: string;
     to: string;
     name: string;
@@ -272,6 +275,7 @@ export const zernioAdapter: ChannelAdapter = {
       .sort((a, b) => Number(a) - Number(b))
       .map((k) => input.values[k] ?? "");
 
+    await input.beforeSend?.();
     const res = await fetch(`${creds.baseUrl}/v1/inbox/conversations`, {
       method: "POST",
       headers: {
@@ -479,6 +483,9 @@ export const zernioAdapter: ChannelAdapter = {
 
   /** Gestão das definições aprovadas — ver `../zernio/templates.ts`. */
   templates: zernioTemplateOps,
+
+  /** Venda reportada à Meta pela ponte do provedor — ver `../zernio/conversoes.ts`. */
+  reportConversion: zernioReportConversion,
 
   codes: {
     notConfigured: "zernio_not_configured",

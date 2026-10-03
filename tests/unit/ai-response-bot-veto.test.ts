@@ -23,7 +23,6 @@ vi.mock("@/lib/ai/gateway", () => ({
   DEFAULT_BOT_MODEL: "anthropic/claude-sonnet-4-6",
   gatewayConfig: {},
   gatewayHeaders: () => ({}),
-  isAiGatewayConfigured: () => true,
   isEmbeddingProviderConfigured: () => false,
 }));
 
@@ -48,6 +47,9 @@ function makeAdminStub(tables: StubTables, queried: string[]) {
     const chain: any = {
       select: () => chain,
       eq: () => chain,
+      // `.is("archived_at", null)`: o worker legado passou a filtrar agente
+      // arquivado no SELECT, e um dublê literal quebra a cada filtro novo.
+      is: () => chain,
       order: () => chain,
       limit: () => chain,
       maybeSingle: () => Promise.resolve({ data: result, error: null }),
@@ -70,6 +72,7 @@ function convRow(assigneeKind: string | null) {
     bot_silenced_until: null,
     last_handoff_at: null,
     assignee_kind: assigneeKind,
+    organizations: { status: "active" },
     contacts: {
       id: "66666666-6666-4666-8666-666666666666",
       display_name: null, // sem PII em teste (LGPD)

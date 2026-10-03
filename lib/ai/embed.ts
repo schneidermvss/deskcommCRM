@@ -1,25 +1,40 @@
 /**
- * Embedding wrapper for the RAG pipeline.
+ * Embedding do RAG — indexação e busca, o mesmo modelo dos dois lados.
  *
- * Routes through Vercel AI Gateway when `AI_GATEWAY_API_KEY` is set; otherwise
- * uses the OpenAI provider directly (still no `@anthropic-ai/sdk`-style imports
- * — embeddings are an OpenAI capability and the gateway proxies them).
+ * A chave vem de `lib/ai/embeddings/chave.ts`, que resolve pela organização:
+ * binding do ponto → credencial OpenAI/OpenRouter da org → gateway da instalação
+ * → chave da instalação. Até a 0181 este arquivo lia SÓ `process.env`, e o efeito era o
+ * pior possível para quem instala: cadastrar a chave da OpenAI pela tela não
+ * habilitava a base de conhecimento, enquanto duas telas do produto prometiam
+ * que sim.
  */
 
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import { embed } from "ai";
 
-import { env } from "@/lib/env";
 import {
-  DEFAULT_EMBEDDING_MODEL,
-  gatewayConfig,
-  gatewayHeaders,
-  isEmbeddingProviderConfigured,
-  type ModelId,
-} from "@/lib/ai/gateway";
+  DIMENSOES_DO_EMBEDDING,
+  modeloDeEmbedding,
+  resolverChaveDeEmbedding,
+  type ChaveDeEmbedding,
+  type PontoDeEmbedding,
+} from "@/lib/ai/embeddings/chave";
+import { gatewayHeaders, type ModelId } from "@/lib/ai/gateway";
 
 export interface EmbedOptions {
   organizationId: string;
+  /**
+   * Qual ponto de IA está chamando. Muda apenas de QUAL binding a chave sai —
+   * o modelo é o mesmo por contrato, e divergir quebraria o recall em silêncio.
+   */
+  ponto?: PontoDeEmbedding;
+  /**
+   * Chave já resolvida. Existe para o indexador resolver UMA vez e embedar N
+   * chunks: sem isto, indexar um documento de 200 trechos decifraria a
+   * credencial 200 vezes.
+   */
+  chave?: ChaveDeEmbedding;
   model?: ModelId;
 }
 
@@ -29,36 +44,85 @@ export interface EmbedResult {
   model: string;
 }
 
+/** Falta de chave é um ESTADO do tenant, não um acidente: tipo próprio para quem
+ *  chama poder mostrar a tela certa em vez de repetir um erro genérico. */
+export class SemChaveDeEmbeddingError extends Error {
+  readonly code = "embedding_sem_chave";
+  constructor(readonly organizationId: string) {
+    super(
+      "Esta organização não tem chave de embedding para indexar nem consultar o material. " +
+        "Cadastre uma chave OpenAI ou OpenRouter em Credenciais.",
+    );
+    this.name = "SemChaveDeEmbeddingError";
+  }
+}
+
 export async function embedText(
   content: string,
   opts: EmbedOptions,
 ): Promise<EmbedResult> {
-  if (!isEmbeddingProviderConfigured()) {
-    throw new Error("embed_unavailable: no AI_GATEWAY_API_KEY or OPENAI_API_KEY configured");
+  const chave =
+    opts.chave ?? (await resolverChaveDeEmbedding(opts.organizationId, opts.ponto));
+  if (!chave) {
+    throw new SemChaveDeEmbeddingError(opts.organizationId);
   }
-  const model = opts.model ?? DEFAULT_EMBEDDING_MODEL;
-  const cfg = gatewayConfig();
+
+  const modelId = String(opts.model ?? modeloDeEmbedding(chave.provedor));
 
   // COM gateway: a string `openai/text-embedding-3-small` é roteada por ele, que
   // lê `AI_GATEWAY_API_KEY` do process.env. Headers vão junto p/ observabilidade
   // por tenant + ZDR.
   //
-  // SEM gateway: precisa ser o provider OpenAI EXPLÍCITO. Passar a string com
+  // SEM gateway: precisa ser um provider EXPLÍCITO. Passar a string com
   // barra aqui não cai no OpenAI direto — no AI SDK, id com barra é resolvido
   // pelo gateway da Vercel mesmo sem chave, entrando no plano anônimo, cujo teto
-  // devolve `GatewayRateLimitError` e derruba a busca na base de conhecimento.
-  // Este arquivo prometia esse caminho no cabeçalho desde sempre e não o tinha.
-  const resolvido = cfg
-    ? model
-    : createOpenAI({ apiKey: env.OPENAI_API_KEY }).textEmbeddingModel(
-        String(model).replace(/^openai\//, ""),
+  // devolve `GatewayRateLimitError`. OpenAI direto usa id sem prefixo; OpenRouter
+  // recebe o slug completo que a API de embeddings dela exige.
+  const resolvido = chave.viaGateway
+    ? modelId
+    : chave.provedor === "google"
+      ? createGoogleGenerativeAI({ apiKey: chave.apiKey ?? "" }).embeddingModel(
+          modelId.replace(/^google\//, ""),
+        )
+      : createOpenAI({
+        apiKey: chave.apiKey ?? "",
+        ...(chave.baseUrl ? { baseURL: chave.baseUrl } : {}),
+      }).textEmbeddingModel(
+        chave.provedor === "openrouter" ? modelId : modelId.replace(/^openai\//, ""),
       );
 
   const result = await embed({
     model: resolvido,
     value: content,
-    headers: cfg ? gatewayHeaders({ organizationId: opts.organizationId }) : undefined,
+    headers: chave.viaGateway
+      ? gatewayHeaders({ organizationId: opts.organizationId })
+      : undefined,
+    // O Gemini devolve 3072 dimensões por padrão; pedir 1536 é o que deixa a
+    // coluna `vector(1536)` servir aos dois provedores sem migration. A busca é
+    // por cosseno (`<=>`), então o vetor não normalizado dessa dimensão não
+    // distorce a nota. O `taskType` é o par documento×pergunta do próprio Google.
+    ...(chave.provedor === "google"
+      ? {
+          providerOptions: {
+            google: {
+              outputDimensionality: DIMENSOES_DO_EMBEDDING,
+              taskType:
+                opts.ponto === "embedding_consultar" ? "RETRIEVAL_QUERY" : "RETRIEVAL_DOCUMENT",
+            },
+          },
+        }
+      : {}),
   });
+
+  // Dimensão asserida a cada chamada: divergir de modelo quebra o recall em
+  // SILÊNCIO (os vetores deixam de ser comparáveis), e uma chamada recusada é
+  // infinitamente melhor que um acervo que responde errado com nota alta.
+  if (result.embedding.length !== DIMENSOES_DO_EMBEDDING) {
+    throw new Error(
+      `embedding com ${result.embedding.length} dimensões, esperado ${DIMENSOES_DO_EMBEDDING} ` +
+        `(pin de contrato ${modelId}) — recall quebraria em silêncio`,
+    );
+  }
 
   // EmbedResult.embedding is `number[]` for single-value embed.
   const promptTokens =
@@ -66,9 +130,5 @@ export async function embedText(
     (result.usage as { tokens?: number; promptTokens?: number } | undefined)?.promptTokens ??
     0;
 
-  return {
-    embedding: result.embedding,
-    promptTokens,
-    model: typeof model === "string" ? model : String(model),
-  };
+  return { embedding: result.embedding, promptTokens, model: modelId };
 }
