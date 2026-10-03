@@ -79,7 +79,7 @@ export function NoteCard({ note, onDelete }: Props) {
     <div className="group flex w-full min-w-0 justify-center px-4 py-1">
       <div className="max-w-[85%] min-w-0 rounded-xl border border-warning/40 bg-warning-bg px-3 py-2 text-sm text-warning-fg shadow-sm">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 text-[11px] font-semibold opacity-80">
+          <div className="flex items-center gap-1.5 text-2xs font-semibold opacity-80">
             <NoteIcon size={12} weight="fill" aria-hidden />
             <span>{note.created_by_name ?? t("Alguém")}</span>
             <span aria-hidden>·</span>
@@ -101,7 +101,7 @@ export function NoteCard({ note, onDelete }: Props) {
             renderizar o `<p>` assim mesmo deixaria um parágrafo fantasma de
             altura nula entre o arquivo e a hora. */}
         {note.body && <p className="mt-1 whitespace-pre-wrap wrap-anywhere leading-snug">{note.body}</p>}
-        <div className="mt-1 text-right text-[10px] opacity-70">{time}</div>
+        <div className="mt-1 text-right text-2xs opacity-70">{time}</div>
       </div>
     </div>
   );

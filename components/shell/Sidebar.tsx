@@ -286,12 +286,12 @@ export function SidebarContent({
                           className={cn(
                             "relative flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
                             isActive
-                              ? "bg-accent text-accent-foreground"
+                              ? "bg-accent-soft font-semibold text-foreground before:absolute before:top-1.5 before:bottom-1.5 before:left-0 before:w-[3px] before:rounded-r-full before:bg-accent"
                               : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
                             collapsed && "justify-center px-2",
                           )}
                         >
-                          <Icon size={18} weight={isActive ? "fill" : "regular"} aria-hidden />
+                          <Icon size={18} weight={isActive ? "fill" : "regular"} className={isActive ? "text-accent" : undefined} aria-hidden />
                           {!collapsed && <span className="truncate">{t(item.label)}</span>}
                           {item.healthDot && (
                             <ConnectionHealthDot
@@ -312,9 +312,9 @@ export function SidebarContent({
                         aria-current={pathname === group.hub.href ? "page" : undefined}
                         onClick={onNavigate}
                         className={cn(
-                          "flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
+                          "relative flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
                           pathname === group.hub.href
-                            ? "bg-accent text-accent-foreground"
+                            ? "bg-accent-soft font-semibold text-foreground before:absolute before:top-1.5 before:bottom-1.5 before:left-0 before:w-[3px] before:rounded-r-full before:bg-accent"
                             : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
                           collapsed && "justify-center px-2",
                         )}
@@ -334,7 +334,7 @@ export function SidebarContent({
             {collapsed ? (
               <div aria-hidden className="mx-2 border-t" />
             ) : (
-              <h2 className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+              <h2 className="px-3 text-2xs font-medium uppercase tracking-wider text-muted-foreground">
                 Loja
               </h2>
             )}
@@ -366,9 +366,9 @@ export function SidebarContent({
             aria-current={pathname.startsWith(rodape.href) ? "page" : undefined}
             onClick={onNavigate}
             className={cn(
-              "mb-1 flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
+              "relative mb-1 flex items-center gap-3 rounded-md px-3 py-1 text-sm transition-colors",
               pathname.startsWith(rodape.href)
-                ? "bg-accent text-accent-foreground"
+                ? "bg-accent-soft font-semibold text-foreground before:absolute before:top-1.5 before:bottom-1.5 before:left-0 before:w-[3px] before:rounded-r-full before:bg-accent"
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
               collapsed && "justify-center px-2",
             )}

@@ -321,12 +321,12 @@ export function MessageBubble({
           </div>
         )}
         {remetente && (
-          <p className="mb-0.5 text-[11px] font-medium text-muted-foreground">
+          <p className="mb-0.5 text-2xs font-medium text-muted-foreground">
             {rotuloDoRemetente(remetente)}
           </p>
         )}
         {senderLabel && (
-          <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold opacity-80">
+          <div className="mb-0.5 flex items-center gap-1 text-2xs font-semibold opacity-80">
             {senderLabel === "IA" ? (
               <Robot size={10} weight="duotone" aria-hidden />
             ) : null}
@@ -361,7 +361,7 @@ export function MessageBubble({
                 interna. Não revelamos texto de uma mensagem apagada pelo cliente. */}
             {isOutbound && message.body && (
               <div className="border-t border-current/20 pt-1">
-                <p className="text-[10px] opacity-70">{t("Visível só aqui no CRM")}</p>
+                <p className="text-2xs opacity-70">{t("Visível só aqui no CRM")}</p>
                 <p className="whitespace-pre-wrap wrap-anywhere leading-snug">{message.body}</p>
               </div>
             )}
@@ -394,7 +394,7 @@ export function MessageBubble({
 
         <div
           className={cn(
-            "mt-1 flex items-center justify-end gap-1 text-[10px]",
+            "mt-1 flex items-center justify-end gap-1 text-2xs",
             isOutbound ? "text-primary-foreground" : "text-muted-foreground",
           )}
         >

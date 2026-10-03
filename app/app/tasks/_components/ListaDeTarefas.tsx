@@ -106,7 +106,7 @@ function Linha({
           <p className="mt-0.5 truncate text-xs text-muted-foreground">{tarefa.description}</p>
         ) : null}
 
-        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-2xs">
           <span
             className={cn(
               "rounded-full px-2 py-0.5 font-medium",
@@ -149,7 +149,7 @@ function Linha({
             <Button
               variant="destructive"
               size="sm"
-              className="h-7 px-2 text-[11px]"
+              className="h-7 px-2 text-2xs"
               disabled={ocupada}
               onClick={() => comBloqueio(() => aoApagar(tarefa))}
             >

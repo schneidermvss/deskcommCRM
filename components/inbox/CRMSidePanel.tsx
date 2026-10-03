@@ -676,7 +676,7 @@ export function CRMSidePanel({ conversation }: Props) {
           {tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {tags.map((t) => (
-                <ChipDeEtiqueta key={t} tag={t} className="h-4 px-1.5 text-[10px]" />
+                <ChipDeEtiqueta key={t} tag={t} className="h-4 px-1.5 text-2xs" />
               ))}
             </div>
           )}

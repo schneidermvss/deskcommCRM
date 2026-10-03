@@ -201,7 +201,7 @@ export function OrgMemoryClient({ initialState }: Props) {
                       <span className="font-mono text-xs">v{v.version_number}</span>
                       <span className="text-xs text-muted-foreground">{formatDate(v.created_at, tagDoIdioma)}</span>
                       {document?.version_id === v.id && (
-                        <Badge variant="success" className="text-[10px]">
+                        <Badge variant="success" className="text-2xs">
                           {t("ativa")}
                         </Badge>
                       )}
@@ -296,7 +296,7 @@ export function OrgMemoryClient({ initialState }: Props) {
                 >
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{entry.title}</span>
-                    <Badge variant={entry.source === "manual" ? "neutral" : "info"} className="text-[10px]">
+                    <Badge variant={entry.source === "manual" ? "neutral" : "info"} className="text-2xs">
                       {rotuloDaOrigem[entry.source]}
                     </Badge>
                     <span className="ml-auto text-xs text-muted-foreground">{formatDate(entry.created_at, tagDoIdioma)}</span>

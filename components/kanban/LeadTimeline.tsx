@@ -71,13 +71,13 @@ function Linha({ item, aoVivo }: { item: TimelineItemView; aoVivo?: boolean }) {
           {aoVivo && (
             // O que chegou AGORA fica marcado: sem isto ele entraria na lista
             // idêntico ao resto e a chegada seria indistinguível do histórico.
-            <span className="ml-1.5 text-[10px] uppercase tracking-wide text-accent">
+            <span className="ml-1.5 text-2xs uppercase tracking-wide text-accent">
               {t("agora")}
             </span>
           )}
         </p>
         {item.reason && <p className="mt-0.5 text-xs text-text-muted">{t(item.reason)}</p>}
-        <p className="mt-0.5 text-[11px] text-text-muted">
+        <p className="mt-0.5 text-2xs text-text-muted">
           {nome} · {quando(item.performed_at, tagDoIdioma)}
         </p>
       </div>
@@ -151,7 +151,7 @@ export function LeadTimeline({ itens, chegouAoVivo, isLoading, isError }: Props)
                 <span aria-hidden className="mt-1 h-2 w-0.5 shrink-0 bg-border" />
                 <span className="first-letter:uppercase">{b.rotulo}</span>
                 <span className="text-text-muted">· {b.itens.length} {t("ações")}</span>
-                <span aria-hidden className="ml-auto text-[10px]">
+                <span aria-hidden className="ml-auto text-2xs">
                   {aberto ? "−" : "+"}
                 </span>
               </button>
@@ -197,7 +197,7 @@ export function LeadTimeline({ itens, chegouAoVivo, isLoading, isError }: Props)
               <span>
                 {nome} · {b.itens.length} {t("ações")}
               </span>
-              <span aria-hidden className="ml-auto text-[10px]">
+              <span aria-hidden className="ml-auto text-2xs">
                 {aberto ? "−" : "+"}
               </span>
             </button>

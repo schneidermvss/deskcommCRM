@@ -32,19 +32,21 @@
 
 :root {
   /* Surfaces (light) */
-  --color-bg: #faf9f6;
+  --color-bg: #f4f4f1;
   --color-surface: #ffffff;
-  --color-surface-elevated: #f5f3ee;
+  --color-surface-elevated: #f9f9f7;
   --color-overlay: rgba(28, 26, 22, 0.42);
 
   /* Text (light) */
-  --color-text: #1c1a16;
-  --color-text-muted: #5d594f;
-  --color-text-subtle: #7d786c;
+  --color-text: #1b1b18;
+  --color-text-muted: #4f4f48;
+  --color-text-subtle: #66665e;
 
   /* Borders (light) */
-  --color-border: #e7e3da;
-  --color-border-strong: #d2cdbf;
+  --color-border: #e4e4de;
+  --color-border-strong: #d3d3cb;
+  --color-hover: #ecece7;
+  --color-border-control: #85857b;
 
   /* Accent — Sage (11 stops) */
   --color-accent-50:  #f3f6f1;
@@ -160,7 +162,7 @@
   --destructive: var(--color-error);
   --destructive-foreground: #ffffff;
   --border: var(--color-border);
-  --input: var(--color-border);
+  --input: var(--color-border-control);
   --ring: var(--color-accent-500);
   --radius: var(--radius-md);
   /* ---- Agenda · cor de pessoa (8 trilhas) ------------------------------
@@ -250,15 +252,17 @@
    (lib/branding/css.ts), que só ganha consumidor com a tela de marca.
    ───────────────────────────────────────────────────────────────────────── */
 [data-theme="light"] {
-  --color-bg: #faf9f6;
+  --color-bg: #f4f4f1;
   --color-surface: #ffffff;
-  --color-surface-elevated: #f5f3ee;
+  --color-surface-elevated: #f9f9f7;
   --color-overlay: rgba(28, 26, 22, 0.42);
-  --color-text: #1c1a16;
-  --color-text-muted: #5d594f;
-  --color-text-subtle: #7d786c;
-  --color-border: #e7e3da;
-  --color-border-strong: #d2cdbf;
+  --color-text: #1b1b18;
+  --color-text-muted: #4f4f48;
+  --color-text-subtle: #66665e;
+  --color-border: #e4e4de;
+  --color-border-strong: #d3d3cb;
+  --color-hover: #ecece7;
+  --color-border-control: #85857b;
   --color-accent: var(--color-accent-600);
   --color-accent-fg: #ffffff;
   --color-accent-soft: var(--color-accent-100);
@@ -307,7 +311,7 @@
   --destructive: var(--color-error);
   --destructive-foreground: #ffffff;
   --border: var(--color-border);
-  --input: var(--color-border);
+  --input: var(--color-border-control);
   --ring: var(--color-accent-500);
   /* ---- Agenda · cor de pessoa (espelho do :root) -----------------------
    * Espelhado aqui porque o tema escuro sobrescreve estas oito chaves, e
@@ -328,19 +332,21 @@
 
 [data-theme="dark"] {
   /* Surfaces (dark — drawn) */
-  --color-bg: #161510;
-  --color-surface: #1d1c17;
-  --color-surface-elevated: #272620;
+  --color-bg: #121211;
+  --color-surface: #1a1a18;
+  --color-surface-elevated: #232321;
   --color-overlay: rgba(0, 0, 0, 0.55);
 
   /* Text (dark) */
-  --color-text: #f5f4ef;
-  --color-text-muted: #8e8b7f;
-  --color-text-subtle: #605e54;
+  --color-text: #f1f1ec;
+  --color-text-muted: #b9b8ae;
+  --color-text-subtle: #98968c;
 
   /* Borders (dark) */
-  --color-border: #33312a;
-  --color-border-strong: #444239;
+  --color-border: #2e2e2b;
+  --color-border-strong: #3d3d39;
+  --color-hover: #2b2b28;
+  --color-border-control: #7a786f;
 
   /* Accent stays same hex stops; default shifts up for dark contrast */
   --color-accent-50:  #f3f6f1;
@@ -410,7 +416,7 @@
   --destructive: var(--color-error);
   --destructive-foreground: #ffffff;
   --border: var(--color-border);
-  --input: var(--color-border);
+  --input: var(--color-border-control);
   --ring: var(--color-accent-400);
   /* ---- Agenda · cor de pessoa (tema escuro) ----------------------------
    * Mais claras e menos saturadas que as do claro: sobre `#161510` a versão
@@ -514,6 +520,8 @@
      é decisão de design, não de migração. */
   --color-border: var(--color-border);
   --color-border-strong: var(--color-border-strong);
+  --color-border-control: var(--color-border-control);
+  --color-hover: var(--color-hover);
   --color-input: var(--color-border);
   --color-ring: var(--color-accent-500);
   --color-background: var(--color-bg);
@@ -540,13 +548,17 @@
   --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Monaco,
     Consolas, monospace;
 
-  /* Escala de leitura do cliente — só a partir de `base`. `xs`/`sm` ficam no
-     padrão do Tailwind de propósito: são o texto do menu lateral e das listas
-     densas (Inbox, Kanban), testados para caber sem rolar
-     (tests/e2e/navegacao.spec.ts mede a altura exata do sidebar). O que se LÊ
-     com atenção — parágrafo, título de página, mensagem do Inbox — ganha
-     ~6-8% de corpo e mais respiro entre linhas. Veio de tailwind.config.ts
-     (removido quando o projeto migrou pro Tailwind 4 CSS-first). */
+  /* Escala de leitura do cliente. O `sm` (14px) fica no padrão do Tailwind: é o
+     corpo da interface. `xs` e o novo `2xs` formam o piso (ver abaixo), e do `base`
+     para cima o texto de leitura ganha ~6-8% de corpo e mais respiro entre linhas.
+     Veio de tailwind.config.ts (removido na migração para o Tailwind 4). */
+  /* Piso e pequeno do produto: nada abaixo de 12px, e o `xs` sobe de 12 para 13px.
+     A altura de linha de `xs` fica em 1.25 (16,25px) de propósito: o menu lateral
+     é medido pelo e2e navegacao.spec e cada grupo tem um rótulo `xs`. */
+  --text-2xs: 0.75rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.25;
   --text-base: 1.0625rem;
   --text-base--line-height: 1.65;
   --text-lg: 1.1875rem;

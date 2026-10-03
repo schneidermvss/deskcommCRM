@@ -466,9 +466,9 @@ export function InboxFilters({ value, onChange }: Props) {
                             a mesma que a lista mostra ao lado — mesma razão do
                             `border-accent`, que é o que faz o filtro ativo se
                             reconhecer de relance. */}
-                        <ChipDeEtiqueta tag={etiquetas[0]!} className="h-5 px-1.5 text-[11px]" />
+                        <ChipDeEtiqueta tag={etiquetas[0]!} className="h-5 px-1.5 text-2xs" />
                         {etiquetas.length > 1 && (
-                          <span className="tabular-nums text-[11px]">+{etiquetas.length - 1}</span>
+                          <span className="tabular-nums text-2xs">+{etiquetas.length - 1}</span>
                         )}
                       </span>
                     ) : (
@@ -571,7 +571,7 @@ export function InboxFilters({ value, onChange }: Props) {
                 >
                   {t(meta.label)}
                   {typeof count === "number" && count > 0 && (
-                    <span className="text-[11px] tabular-nums text-text-subtle">{count}</span>
+                    <span className="text-2xs tabular-nums text-text-subtle">{count}</span>
                   )}
                 </TabsTrigger>
               );

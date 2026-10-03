@@ -92,7 +92,7 @@ function BadgeRisco({ risco }: { risco: ToolRisk }) {
   const t = useT();
   const meta = riscoMeta(risco);
   return (
-    <Badge variant="outline" className={`text-[11px] ${CLASSE_RISCO[risco]}`} title={t(meta.explicacao)}>
+    <Badge variant="outline" className={`text-2xs ${CLASSE_RISCO[risco]}`} title={t(meta.explicacao)}>
       {t(meta.rotulo)}
     </Badge>
   );
@@ -150,7 +150,7 @@ function FichaCapacidade({
           </span>
         ) : null}
         {mostrarNomeTecnico ? (
-          <code className="block font-mono text-[11px] text-muted-foreground">
+          <code className="block font-mono text-2xs text-muted-foreground">
             {capacidade.name}
           </code>
         ) : null}
@@ -360,7 +360,7 @@ export function ToolPicker({ value: valorSalvo, onChange, disabled, ocultar }: P
                       {t(pacote.rotulo)}
                     </label>
                     {estado === "parcial" ? (
-                      <Badge variant="outline" className="text-[11px]">
+                      <Badge variant="outline" className="text-2xs">
                         {t("parcial")}
                       </Badge>
                     ) : null}

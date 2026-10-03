@@ -360,7 +360,7 @@ export function TemplatesParceiroClient({
             />
             {/* O contador existe porque passar do limite é RECUSA, e a recusa
                 chega horas depois sem dizer que o problema era o tamanho. */}
-            <span className="self-end text-[10px] text-muted-foreground">
+            <span className="self-end text-2xs text-muted-foreground">
               {corpo.length}/{LIMITE_CORPO}
             </span>
           </div>
@@ -373,7 +373,7 @@ export function TemplatesParceiroClient({
               aria-label={t("Rodapé")}
               className="h-9 rounded-md border border-input bg-background px-2 text-sm"
             />
-            <span className="self-end text-[10px] text-muted-foreground">
+            <span className="self-end text-2xs text-muted-foreground">
               {rodape.length}/{LIMITE_RODAPE}
             </span>
           </div>
@@ -468,7 +468,7 @@ export function TemplatesParceiroClient({
                coisa à outra. O formulário deixava digitar `{{1}}` e nunca
                pedia o exemplo. */
             <div className="flex flex-col gap-1.5 rounded-md border border-amber-300 bg-amber-50/50 p-2 dark:border-amber-800/60 dark:bg-amber-950/20">
-              <p className="text-[11px] text-amber-900 dark:text-amber-200">
+              <p className="text-2xs text-amber-900 dark:text-amber-200">
                 {t("A revisão exige um exemplo de cada valor. Sem eles o modelo é recusado.")}
               </p>
               {Array.from({ length: nVariaveis }, (_, i) => (
@@ -495,7 +495,7 @@ export function TemplatesParceiroClient({
           {/* O formato do nome e o texto são validados PELA PLATAFORMA, e a
               recusa dela chega inteira ao operador. Repetir a regra aqui a faria
               envelhecer separado da fonte. */}
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             {editando
               ? t(
                   "Ao salvar, a plataforma revisa o modelo de novo. A Meta limita quantas vezes um modelo aprovado pode ser editado; se passar do limite, a resposta dela aparece aqui.",
@@ -572,12 +572,12 @@ export function TemplatesParceiroClient({
                   <span className="font-mono text-sm">{tpl.name}</span>
                   <span className="text-xs text-muted-foreground">{tpl.language}</span>
                   {tpl.category && (
-                    <span className="rounded-md bg-muted px-1.5 text-[10px] uppercase text-muted-foreground">
+                    <span className="rounded-md bg-muted px-1.5 text-2xs uppercase text-muted-foreground">
                       {tpl.category}
                     </span>
                   )}
                   {c.variaveis > 0 && (
-                    <span className="text-[10px] text-muted-foreground">
+                    <span className="text-2xs text-muted-foreground">
                       {c.variaveis} {t("valor(es)")}
                     </span>
                   )}
@@ -595,7 +595,7 @@ export function TemplatesParceiroClient({
                     à vista — não escondido atrás do clique: quem precisa dele
                     não sabe que precisa procurar. */}
                 {tpl.rejectedReason && (
-                  <p className="mt-1 text-[11px] text-destructive">{tpl.rejectedReason}</p>
+                  <p className="mt-1 text-2xs text-destructive">{tpl.rejectedReason}</p>
                 )}
 
                 {expandido && (
@@ -632,7 +632,7 @@ export function TemplatesParceiroClient({
                           </Button>
                         </>
                       )}
-                      <span className="ml-auto text-[10px] text-muted-foreground">
+                      <span className="ml-auto text-2xs text-muted-foreground">
                         {t("Sincronizado em")} {new Date(tpl.syncedAt).toLocaleString(tagDoIdioma)}
                       </span>
                     </div>

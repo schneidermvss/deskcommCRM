@@ -208,7 +208,7 @@ function FormularioDeLinks({ contato, pipelineId }: { contato: Contact; pipeline
                   </a>
                 )}
               </div>
-              {erro && <p className="text-[11px] text-destructive">{t("Endereço inválido.")}</p>}
+              {erro && <p className="text-2xs text-destructive">{t("Endereço inválido.")}</p>}
             </div>
           );
         })}

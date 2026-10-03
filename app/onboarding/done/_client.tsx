@@ -129,7 +129,7 @@ export function DoneClient({
                     <li key={passo} className="flex gap-2 text-xs text-muted-foreground">
                       <span
                         aria-hidden
-                        className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px]"
+                        className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-2xs"
                       >
                         {i + 1}
                       </span>

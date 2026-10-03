@@ -129,7 +129,7 @@ export function LeadDossier({
             Sem esta linha, quem visse o número mudando no cabeçalho e nunca na
             timeline concluiria que a timeline está incompleta. */}
         {score?.at && (
-          <p className="pt-2 text-[11px] text-text-muted">
+          <p className="pt-2 text-2xs text-text-muted">
             {t("Probabilidade recalculada automaticamente")} ·{" "}
             {new Date(score.at).toLocaleString(tagDoIdioma)}
           </p>

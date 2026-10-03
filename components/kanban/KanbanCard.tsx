@@ -302,7 +302,7 @@ export function KanbanCard({
               ownerName={card.owner.name}
               agentVersion={card.owner.agentVersion}
             />
-            <span className="shrink-0 whitespace-nowrap text-[11px] tabular-nums text-text-muted">
+            <span className="shrink-0 whitespace-nowrap text-2xs tabular-nums text-text-muted">
               {state.showStageAge && age
                 ? `${age} ${t("em")} ${card.stageName}`
                 : `${t("em")} ${card.stageName}`}

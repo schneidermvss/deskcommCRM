@@ -76,7 +76,7 @@ function SerieDiaria({ dias }: { dias: LinhaDoDia[] }) {
             data-dia={d.data}
             data-quantidade={d.quantidade}
           />
-          <span className="text-[10px] tabular-nums text-muted-foreground">{d.rotulo}</span>
+          <span className="text-2xs tabular-nums text-muted-foreground">{d.rotulo}</span>
         </div>
       ))}
     </div>

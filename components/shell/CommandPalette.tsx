@@ -229,7 +229,7 @@ function Resultados({ aoEscolher }: { aoEscolher: () => void }) {
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     {t(rotuloGrupo)}
                   </h3>
-                  <span className="text-[11px] text-muted-foreground">
+                  <span className="text-2xs text-muted-foreground">
                     {itens.length} {itens.length === 1 ? t("ferramenta") : t("ferramentas")}
                   </span>
                 </div>
@@ -266,7 +266,7 @@ function Resultados({ aoEscolher }: { aoEscolher: () => void }) {
                         </div>
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-xs font-semibold leading-tight">{t(d.label)}</p>
-                          <p className={cn("mt-0.5 line-clamp-2 text-[11px] leading-snug", secundario)}>
+                          <p className={cn("mt-0.5 line-clamp-2 text-2xs leading-snug", secundario)}>
                             {t(d.description)}
                           </p>
                         </div>
@@ -320,7 +320,7 @@ function Resultados({ aoEscolher }: { aoEscolher: () => void }) {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
                     <span className="text-sm font-medium">{t(d.label)}</span>
-                    <span className={cn("truncate text-[10px] font-medium tracking-wider uppercase", secundario)}>
+                    <span className={cn("truncate text-2xs font-medium tracking-wider uppercase", secundario)}>
                       {t(ROTULO_GRUPO.get(d.group) ?? "")}
                     </span>
                   </div>
@@ -333,7 +333,7 @@ function Resultados({ aoEscolher }: { aoEscolher: () => void }) {
           })}
         </ul>
       )}
-      <div className="flex items-center justify-between border-t bg-muted/20 px-4 py-2 text-[11px] text-muted-foreground">
+      <div className="flex items-center justify-between border-t bg-muted/20 px-4 py-2 text-2xs text-muted-foreground">
         <span>{t("Use as setas ↑↓ e Enter para navegar")}</span>
         <span>{t("ESC para fechar")}</span>
       </div>

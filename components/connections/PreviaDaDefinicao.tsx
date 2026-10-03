@@ -75,8 +75,8 @@ export function PreviaDaDefinicao({
               )}
               {cabecalho && <p className="mb-1 text-sm font-semibold">{cabecalho}</p>}
               {corpo && <p className="whitespace-pre-wrap text-sm leading-snug">{corpo}</p>}
-              {rodape && <p className="mt-1 text-[11px] text-muted-foreground">{rodape}</p>}
-              <p className="mt-1 flex items-center justify-end gap-0.5 text-[10px] text-muted-foreground">
+              {rodape && <p className="mt-1 text-2xs text-muted-foreground">{rodape}</p>}
+              <p className="mt-1 flex items-center justify-end gap-0.5 text-2xs text-muted-foreground">
                 12:00 <Checks size={12} aria-hidden />
               </p>
             </div>
@@ -104,7 +104,7 @@ export function PreviaDaDefinicao({
       </div>
 
       {faltando.length > 0 && (
-        <p className="text-[11px] text-destructive">
+        <p className="text-2xs text-destructive">
           {t("Falta")} {faltando.map((n) => `{{${n}}}`).join(", ")} {t("no texto.")}{" "}
           {t("A numeração é sequencial e a plataforma recusa quando há buraco.")}
         </p>

@@ -183,7 +183,7 @@ export function ConversationHeader({
         <div className="flex min-w-0 items-center gap-1.5">
           <ChannelLogo channel={conversation.channel_sessions} size={20} />
           <h2 className="min-w-0 truncate text-sm font-semibold" title={displayName}>{displayName}</h2>
-          <Badge variant="outline" className="h-4 shrink-0 px-1.5 text-[10px]">
+          <Badge variant="outline" className="h-4 shrink-0 px-1.5 text-2xs">
             {t(STATUS_LABEL[status] ?? status)}
           </Badge>
           {/* Ao lado do estado, não escondido num painel: a pergunta "dá para
@@ -398,7 +398,7 @@ export function ConversationHeader({
             a mesma cara de uma conversa normal. O testid é contrato:
             `escalacao-ciclo.spec.ts` o clica. */}
         {motivo !== null && (
-          <Badge variant="outline" className="h-4 w-fit max-w-full truncate px-1.5 text-[10px]"
+          <Badge variant="outline" className="h-4 w-fit max-w-full truncate px-1.5 text-2xs"
             title={t(ROTULO_DO_MOTIVO[motivo])} data-testid="badge-atendimento-humano">
             {t(ROTULO_DO_MOTIVO[motivo])}
           </Badge>

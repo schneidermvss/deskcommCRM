@@ -317,7 +317,7 @@ export function FormularioDeConexao({ open, onOpenChange, conexao }: Props) {
                   onChange={(e) => setMaxRows(e.target.value)}
                   inputMode="numeric"
                 />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   {LIMITE_LINHAS.minimo}–{LIMITE_LINHAS.maximo}
                 </p>
                 {erros.max_rows && <p className="text-xs text-destructive">{erros.max_rows}</p>}
@@ -330,7 +330,7 @@ export function FormularioDeConexao({ open, onOpenChange, conexao }: Props) {
                   onChange={(e) => setMaxFilters(e.target.value)}
                   inputMode="numeric"
                 />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   {LIMITE_FILTROS.minimo}–{LIMITE_FILTROS.maximo}
                 </p>
                 {erros.max_filters && <p className="text-xs text-destructive">{erros.max_filters}</p>}
@@ -343,7 +343,7 @@ export function FormularioDeConexao({ open, onOpenChange, conexao }: Props) {
                   onChange={(e) => setMaxResponseKb(e.target.value)}
                   inputMode="numeric"
                 />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   {KB_MIN}–{KB_MAX}
                 </p>
                 {erros.max_response_kb && (
