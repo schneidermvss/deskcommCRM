@@ -570,6 +570,9 @@ jobs:
       # Uma variável, os dois scripts: `scripts/test-db.sh` e
       # `scripts/test-update-com-dados.sh` leem esta para escolher a imagem.
       TEST_DB_IMAGE: pgvector/pgvector:pg${{ matrix.pg }}
+      # Este fork ainda não publica releases. Compara com a versão herdada,
+      # mantendo a prova do kit; a variável permite escolher a próxima referência.
+      CONFERENCIA_KIT_RELEASE: ${{ vars.CONFERENCIA_KIT_RELEASE || 'v1.69.0' }}
     steps:
       - uses: actions/checkout@v7
 

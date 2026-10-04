@@ -1,3 +1,5 @@
+import { traduzir } from "@/lib/i18n/dicionario";
+
 import { redirect } from "next/navigation";
 
 import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
@@ -26,6 +28,7 @@ interface ProspeccaoResult {
 
 export default async function ProspeccaoPage() {
   const user = await requireAuth();
+  const t = (texto: string) => traduzir(texto, user.idioma);
   const activeOrg = await resolveActiveOrg(user);
   if (!activeOrg) redirect("/app");
   // Só admin: painel operacional interno da AETRIX, não uma tela de operação
@@ -63,9 +66,9 @@ export default async function ProspeccaoPage() {
       <header className="flex items-center gap-3">
         <MagnifyingGlass size={28} className="text-muted-foreground" weight="duotone" />
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Prospecção</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{t("Prospecção")}</h1>
           <p className="text-sm text-muted-foreground">
-            Squad Opensquad — agentes, comandos e execuções de prospecção de leads.
+            {t("Squad Opensquad — agentes, comandos e execuções de prospecção de leads.")}
           </p>
         </div>
       </header>

@@ -37,6 +37,13 @@ import type { Idioma } from "./idiomas";
 type Traducoes = Record<string, Partial<Record<Exclude<Idioma, "pt-BR">, string>>>;
 
 export const DICIONARIO: Traducoes = {
+  "assíncrona": { es: "asíncrona" },
+  "Atalhos": { es: "Atajos" },
+  "Solicitação livre (usada em 'edit' — ex.: incluir bairro Passo D'Areia no raio de busca)": { es: "Solicitud libre (usada en 'edit' — p. ej.: incluir el barrio Passo D'Areia en el radio de búsqueda)" },
+  "Esta aba só monta o texto do comando — copie e cole no Claude Code rodando localmente. Nada aqui chama o squad.": { es: "Esta pestaña solo prepara el texto del comando — cópielo y péguelo en Claude Code ejecutándose localmente. Aquí no se ejecuta el squad." },
+  "Nenhuma execução sincronizada ainda.": { es: "Todavía no hay ejecuciones sincronizadas." },
+  "Sem arquivos de resultado nesta execução.": { es: "No hay archivos de resultados en esta ejecución." },
+
   // ─── EMPRESAS, PESSOAS E IMPORTAÇÃO (metade B2B do #1621, de @renatofortal) ───
   "Arquivo": {"es": "Archivo"},
   "Atualizado": {"es": "Actualizado"},
