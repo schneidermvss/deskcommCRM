@@ -1,5 +1,8 @@
 "use client";
 
+import { copyToClipboard } from "@/lib/clipboard";
+import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
+
 import { useT } from "@/lib/i18n/IdiomaProvider";
 
 import { useState } from "react";
@@ -80,11 +83,12 @@ const markdownComponents: Components = {
   tr: ({ children }) => <tr className="last:[&>td]:border-b-0">{children}</tr>,
 };
 
-function copiar(texto: string) {
-  navigator.clipboard
-    .writeText(texto)
-    .then(() => toast.success("Comando copiado."))
-    .catch(() => toast.error("Não consegui copiar — selecione e copie manualmente."));
+async function copiar(texto: string) {
+  if (await copyToClipboard(texto)) {
+    toast.success("Comando copiado.");
+  } else {
+    toast.error("Não consegui copiar — selecione e copie manualmente.");
+  }
 }
 
 const SQUAD_PADRAO = "prospeccao-canoas-poa";
@@ -232,6 +236,7 @@ function AbaResultados({
   resultsByRun: Map<string, ProspeccaoResult[]>;
 }) {
   const t = useT();
+  const tagDoIdioma = useTagDeIdioma();
   if (runs.length === 0) {
     return (
       <div className="rounded-lg border border-border bg-surface p-8 text-center text-sm text-muted-foreground">
@@ -248,7 +253,7 @@ function AbaResultados({
             <div>
               <h2 className="text-lg font-semibold">{run.tema ?? run.run_id}</h2>
               <p className="text-xs text-muted-foreground">
-                {run.run_id} · {new Date(run.created_at).toLocaleString("pt-BR")}
+                {run.run_id} · {new Date(run.created_at).toLocaleString(tagDoIdioma)}
               </p>
             </div>
             {run.resultado && (
