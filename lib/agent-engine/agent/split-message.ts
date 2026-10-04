@@ -1,111 +1,67 @@
 /**
- * Quebra o texto da resposta em "bolhas" curtas (Onda 4). Puro. Usado no send
- * do agente quando split_messages está on; o pacing anti-ban espaça cada bolha.
- * Nunca devolve bolha vazia nem (salvo palavra atômica gigante) > maxChars.
- *
- * O PARÁGRAFO É A FRONTEIRA DA BOLHA. Quem escreve em bolhas no WhatsApp decide
- * onde uma termina e a outra começa, e o modelo diz isso com a linha em branco
- * (é o que `instrucaoDeBolhas` pede). Cada parágrafo sai como bolha própria, na
- * ordem do texto; `maxChars` só entra para partir o parágrafo que sozinho
- * estoura — por sentença, depois por palavra —, juntando dentro DELE os
- * pedaços que caibam.
- *
- * Antes, parágrafos vizinhos eram juntados enquanto coubessem em maxChars, e o
- * texto inteiro abaixo do teto saía numa bolha só. Isso deixava a opção sem
- * ajuste possível: teto alto (600) e três parágrafos curtos viravam UMA bolha;
- * teto baixo e o resumo do pedido — uma lista numa linha por item, sem ponto —
- * era cortado por palavra no meio de uma linha, com as quebras de linha
- * perdidas. Medido numa VPS em produção (26/09/2026): com teto 500, o corte do
- * sistema quase nunca agia, e as "bolhas" que o cliente via eram o modelo
- * chamando send_message várias vezes — em paralelo, fora de ordem.
+ * Divide somente quando o texto excede o tamanho configurado. Parágrafos e
+ * frases completas são fronteiras possíveis; espaços entre palavras não são.
+ * Uma unidade sem fronteira segura pode ultrapassar o alvo: nunca truncamos
+ * URL, endereço, telefone, preço ou frase para cumprir um limite de bolha.
  */
 export function splitIntoBubbles(text: string, maxChars: number): string[] {
-  const trimmed = (text ?? "").trim();
-  if (trimmed === "") return [];
+  const body = (text ?? "").trim();
+  if (!body) return [];
+  if (!Number.isFinite(maxChars) || maxChars <= 0 || body.length <= maxChars) return [body];
 
+  const paragraphs = segmentsAt(body, /\n[ \t]*\n+/g);
+  const units = paragraphs.flatMap((paragraph) =>
+    paragraph.trim().length <= maxChars ? [paragraph] : splitSentences(paragraph),
+  );
   const bubbles: string[] = [];
-  for (const para of trimmed.split(/\n{2,}/)) {
-    const p = para.trim();
-    if (p === "") continue;
-    if (p.length <= maxChars) {
-      bubbles.push(p);
-      continue;
+  let current = "";
+  for (const unit of units) {
+    if (current && (current + unit).trim().length > maxChars) {
+      bubbles.push(current.trim());
+      current = "";
     }
-    // Parágrafo que estoura: sentenças (palavra como último recurso), juntando
-    // as vizinhas DESTE parágrafo enquanto couberem.
-    const units: string[] = [];
-    for (const sentence of splitSentences(p)) {
-      if (sentence.length <= maxChars) units.push(sentence);
-      else units.push(...splitWords(sentence, maxChars));
-    }
-    let cur = "";
-    for (const u of units) {
-      const joined = cur === "" ? u : `${cur} ${u}`;
-      if (joined.length <= maxChars) {
-        cur = joined;
-      } else {
-        if (cur !== "") bubbles.push(cur);
-        cur = u;
-      }
-    }
-    if (cur !== "") bubbles.push(cur);
+    current += unit;
   }
+  if (current.trim()) bubbles.push(current.trim());
   return bubbles;
 }
 
-/**
- * Divide em sentenças mantendo a pontuação final (. ! ?).
- *
- * O "." NÃO conta como fim de frase quando está entre dois dígitos — separador
- * de milhar/decimal brasileiro ("R$ 10.990,00", "12.990"). Sem esta guarda,
- * TODO preço em reais virava duas "sentenças" ("R$ 10." e "990 no cartão…"),
- * que a bolha seguinte às vezes junta com espaço espúrio ("R$ 7. 990") e às
- * vezes manda em bolhas do WhatsApp SEPARADAS — e um cliente que só via a
- * primeira lia "R$ 10" como preço fechado de um produto de R$ 10.990.
- * Medido em produção (2026-09-04): a moto DT3 (R$ 10.990) anunciada
- * como "R$ 10" reais.
- *
- * A guarda de milhar era estreita (dígito-ponto-dígito) e deixava a URL de fora:
- * "https://waze.com/ul?q=…" virava "https://waze." + "com/ul?" + "q=…", religadas
- * com espaço espúrio ou mandadas em bolhas separadas. A regra agora é geral: fim
- * de frase = pontuação seguida de espaço/fim.
- */
-function splitSentences(text: string): string[] {
-  const out: string[] = [];
+/** Fatias contíguas: mantém o texto e seus espaços/quebras dentro de cada bolha. */
+function segmentsAt(text: string, boundary: RegExp): string[] {
+  const units: string[] = [];
   let start = 0;
-  const re = /[.!?]+/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const end = m.index + m[0].length;
-    // Pontuação só encerra frase quando seguida de espaço ou do fim do texto.
-    // Isso cobre o separador de milhar/decimal ("10.990") e, de graça, tudo que
-    // carrega . ? ! por dentro sem espaço: URL ("waze.com/ul?q=a&b=1"), domínio,
-    // versão ("1.0"), e-mail. Um "?" de query string nunca é fim de frase.
-    const nextChar = text[end];
-    if (nextChar !== undefined && !/\s/.test(nextChar)) continue;
-    out.push(text.slice(start, end).trim());
+  for (const match of text.matchAll(boundary)) {
+    const end = match.index + match[0].length;
+    units.push(text.slice(start, end));
     start = end;
   }
-  const resto = text.slice(start).trim();
-  if (resto !== "") out.push(resto);
-  return out.length > 0 ? out.filter((s) => s !== "") : [text];
+  if (start < text.length) units.push(text.slice(start));
+  return units;
 }
 
-/** Última linha de defesa: agrupa palavras até maxChars; palavra atômica > max vai sozinha. */
-function splitWords(text: string, maxChars: number): string[] {
-  const out: string[] = [];
-  let cur = "";
-  for (const w of text.split(/\s+/)) {
-    if (w === "") continue;
-    const joined = cur === "" ? w : `${cur} ${w}`;
-    if (joined.length <= maxChars) cur = joined;
-    else {
-      if (cur !== "") out.push(cur);
-      cur = w;
-    }
+/** URLs são intervalos atômicos, incluindo toda a query e o fragmento. */
+function splitSentences(text: string): string[] {
+  const urls = Array.from(text.matchAll(/https?:\/\/[^\s]+/giu), (match) => ({
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+  const units: string[] = [];
+  let start = 0;
+  for (const match of text.matchAll(/[.!?]+(?=\s|$)/g)) {
+    const end = match.index + match[0].length;
+    if (urls.some((url) => match.index >= url.start && match.index < url.end)) continue;
+    // Endereços e nomes abreviados não terminam em "Av." / "Dr." / "J.".
+    const prefix = text.slice(0, end);
+    if (
+      /\b(?:av|r|rod|estr|trav|sr|sra|dr|dra|prof|profa|eng|km)\.$/i.test(prefix) ||
+      /\b[A-Z]\.$/.test(prefix)
+    )
+      continue;
+    units.push(text.slice(start, end));
+    start = end;
   }
-  if (cur !== "") out.push(cur);
-  return out;
+  if (start < text.length) units.push(text.slice(start));
+  return units.length ? units : [text];
 }
 
 /**
@@ -150,7 +106,7 @@ export interface SendInBubblesOpts<T extends BubbleOutcome = BubbleOutcome> {
   antesDaPrimeira?: (primeiraBolha: string) => Promise<void>;
   /**
    * Quantas bolhas ainda cabem no teto de mensagens do turno (MAX_SENDS_PER_TURN).
-   * Um parágrafo = uma bolha, então sem isto um único send_message de 7 parágrafos
+   * Uma resposta longa pode ter várias bolhas; sem isto um único send_message
    * sairia em 7 mensagens físicas, passando do teto que existe para barrar isso.
    * Ausente = sem teto (o comportamento de antes).
    */
@@ -170,29 +126,10 @@ export interface SendInBubblesOpts<T extends BubbleOutcome = BubbleOutcome> {
  */
 export const OK_KINDS = new Set(["sent", "already_sent", "queued"]);
 
-/**
- * O QUE O TURNO DIZ AO MODELO quando `split_messages` está ligado.
- *
- * A tela promete "a resposta sai em bolhas separadas… o agente também é
- * instruído a escrever em parágrafos curtos". O texto que ia ao modelo dizia
- * outra coisa — "Prefira várias mensagens curtas a um texto único e longo" — e
- * o modelo obedecia chamando `send_message` VÁRIAS vezes no mesmo passo. Essas
- * chamadas rodam em paralelo e disputam o envio: o cliente recebia a lista de
- * dados de entrega fora de ordem. Medido numa VPS em produção (26/09/2026, 50
- * turnos reais): 17 respostas saíram partidas pelo próprio modelo — enquanto o
- * corte do sistema, com o teto de 500 caracteres, quase nunca agia.
- *
- * Quem parte em bolhas, EM ORDEM e no ritmo de quem digita, é `sendInBubbles`.
- * O modelo só precisa escrever UM envio em parágrafos curtos.
- *
- * E só quando a resposta tem mais de uma ideia. Pedir parágrafos SEMPRE (a
- * primeira redação desta instrução) fez o agente partir em três bolhas até a
- * resposta de uma frase — "o preço é X" virava saudação + preço + pergunta —,
- * e a loja percebeu a conversa mais longa e mais insistente (medido, 26/09/2026).
- */
+/** Pede um único envio ao modelo; formatação de parágrafos não é delimitador. */
 export function instrucaoDeBolhas(ligado: boolean): string {
   return ligado
-    ? "Escreva cada resposta numa ÚNICA chamada de send_message. Resposta curta vai num parágrafo só; quando ela tiver mais de uma ideia (apresentar uma opção, pedir dados, resumir o que foi combinado), use parágrafos curtos separados por uma linha em branco — o sistema entrega cada parágrafo como uma mensagem, em ordem e com a pausa de quem digita, como uma pessoa no WhatsApp. Nunca chame send_message mais de uma vez no mesmo turno: mensagens enviadas juntas podem chegar fora de ordem."
+    ? "Escreva cada resposta numa ÚNICA chamada de send_message. Preserve URLs, endereços, telefones, preços e nomes completos. Use quebras de linha apenas para organizar a leitura: elas não criam mensagens separadas. O sistema divide somente respostas que excedem o tamanho configurado, em parágrafos ou frases completas. Nunca chame send_message mais de uma vez no mesmo turno: mensagens enviadas juntas podem chegar fora de ordem."
     : "";
 }
 
@@ -221,10 +158,7 @@ export function splitForSend(
   // Teto de mensagens FÍSICAS do turno (MAX_SENDS_PER_TURN, "bolhas incluídas"): o que
   // passa dele segue junto na última bolha, na ordem — nada do texto se perde.
   // ponytail: a última bolha pode passar de maxChars; é o preço de não picotar além do teto.
-  return [
-    ...bubbles.slice(0, maxBubbles - 1),
-    bubbles.slice(maxBubbles - 1).join("\n\n"),
-  ];
+  return [...bubbles.slice(0, maxBubbles - 1), bubbles.slice(maxBubbles - 1).join("\n\n")];
 }
 
 export async function sendInBubbles<T extends BubbleOutcome>(
