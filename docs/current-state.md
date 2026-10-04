@@ -10,6 +10,10 @@ audited_against: origin/main @ 789dfa6 (v1.0.0, 2026-07-29)
 
 # Estado atual — DeskcommCRM
 
+Para as correções operacionais desta distribuição, consulte o
+[registro de 03/10/2026](audits/2026-10-03-distribuicao-fork.md).
+Ele não atualiza o inventário histórico abaixo nem comprova prontidão de produção.
+
 > # ⚠️ ESTE DOCUMENTO É UM RETRATO, NÃO O ESTADO DE HOJE
 >
 > **Ele descreve `origin/main` no commit `789dfa6` (v1.0.0, 2026-07-29).** Os números,

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Agenda residente do agente",
+    "subtitle": "Seleção das instruções e ferramentas sem alterar o turno",
+    "output": "agenda-residente.html",
+    "quality_profile": "standard"
+  },
+  "lanes": [
+    {
+      "id": "motor",
+      "label": "Motor do agente"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "config",
+      "lane": "motor",
+      "col": 0,
+      "type": "service",
+      "label": "agentConfig.toolIds — configuração publicada"
+    },
+    {
+      "id": "agenda",
+      "lane": "motor",
+      "col": 1,
+      "type": "service",
+      "label": "agenda-residente.ts — blocos e seleção das ferramentas"
+    },
+    {
+      "id": "turno",
+      "lane": "motor",
+      "col": 2,
+      "type": "service",
+      "label": "inbound-turn.ts — prompt residente e execução MCP"
+    },
+    {
+      "id": "gate",
+      "lane": "motor",
+      "col": 3,
+      "type": "service",
+      "label": "before-send.ts — agendaStallGate e ferramentas disponíveis"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "config",
+      "to": "agenda",
+      "label": "capacidades do agente"
+    },
+    {
+      "id": "e2",
+      "from": "agenda",
+      "to": "turno",
+      "label": "blocosDeAgendaResidentes e AGENDA_TOOL_NAMES"
+    },
+    {
+      "id": "e3",
+      "from": "turno",
+      "to": "gate",
+      "label": "sinal de execução e ferramentasDeAgendaDoAgente"
+    }
+  ]
+}
