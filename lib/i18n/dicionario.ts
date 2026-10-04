@@ -37,6 +37,13 @@ import type { Idioma } from "./idiomas";
 type Traducoes = Record<string, Partial<Record<Exclude<Idioma, "pt-BR">, string>>>;
 
 export const DICIONARIO: Traducoes = {
+  "assíncrona": { es: "asíncrona" },
+  "Atalhos": { es: "Atajos" },
+  "Solicitação livre (usada em 'edit' — ex.: incluir bairro Passo D'Areia no raio de busca)": { es: "Solicitud libre (usada en 'edit' — p. ej.: incluir el barrio Passo D'Areia en el radio de búsqueda)" },
+  "Esta aba só monta o texto do comando — copie e cole no Claude Code rodando localmente. Nada aqui chama o squad.": { es: "Esta pestaña solo prepara el texto del comando — cópielo y péguelo en Claude Code ejecutándose localmente. Aquí no se ejecuta el squad." },
+  "Nenhuma execução sincronizada ainda.": { es: "Todavía no hay ejecuciones sincronizadas." },
+  "Sem arquivos de resultado nesta execução.": { es: "No hay archivos de resultados en esta ejecución." },
+
   // ─── EMPRESAS, PESSOAS E IMPORTAÇÃO (metade B2B do #1621, de @renatofortal) ───
   "Arquivo": {"es": "Archivo"},
   "Atualizado": {"es": "Actualizado"},
@@ -1736,12 +1743,15 @@ export const DICIONARIO: Traducoes = {
   "Tamanho máximo desse histórico": { es: "Tamaño máximo de ese historial" },
   "As instruções dele": { es: "Sus instrucciones" },
   "Estilo de resposta": { es: "Estilo de respuesta" },
+  "Dividir respostas longas em mensagens": { es: "Dividir respuestas largas en mensajes" },
   "Responder em várias mensagens curtas (como uma pessoa digita)": {
     es: "Responder en varios mensajes cortos (como escribe una persona)",
   },
+  "Respostas que cabem no tamanho alvo saem em uma mensagem, mesmo com parágrafos. Textos longos são divididos em fronteiras seguras, preservando URLs e frases completas. A pausa entre envios segue o ritmo anti-banimento.": { es: "Las respuestas que caben en el tamaño objetivo se envían en un mensaje, incluso con párrafos. Los textos largos se dividen en límites seguros, conservando URLs y frases completas. La pausa entre envíos sigue el ritmo antispam." },
   "Em vez de um bloco único, a resposta sai em bolhas separadas, espaçadas pelo mesmo ritmo anti-banimento do envio. O agente também é instruído a escrever em parágrafos curtos.": {
     es: "En lugar de un solo bloque, la respuesta sale en burbujas separadas, con el mismo ritmo anti-bloqueo que el envío. Además, el agente recibe la instrucción de escribir en párrafos cortos.",
   },
+  "Tamanho alvo por mensagem (80–4000)": { es: "Tamaño objetivo por mensaje (80–4000)" },
   "Tamanho máximo por bolha (80–4000)": { es: "Tamaño máximo por burbuja (80–4000)" },
   "O que o agente pode fazer": { es: "Lo que el agente puede hacer" },
   "Ligue por jornada de trabalho. O agente só consegue fazer o que estiver ligado aqui — e o que estiver ligado, ele fará sozinho durante o atendimento.": {

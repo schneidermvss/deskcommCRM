@@ -80,7 +80,10 @@ import { entraPorPacote, type ToolBundle, type ToolRisk } from "./pacotes";
  * que o bloco ⚠️ acima diz. O dia em que o `evoluir` exigir 28, o passo volta a
  * ser ele.
  */
-export const TETO_TOOLS_POR_AGENTE = 27;
+// Medido em 04/10/2026: com o default `vender`, o menor segundo pacote
+// (`evoluir`) exige 29 vagas. 27 deixa todos os segundos pacotes inacessíveis.
+// 29 é o menor ajuste que restaura a jornada; não habilita capacidades sozinho.
+export const TETO_TOOLS_POR_AGENTE = 29;
 
 /** O mínimo que a regra precisa saber de uma capacidade. */
 export interface CapacidadeSelecionavel {

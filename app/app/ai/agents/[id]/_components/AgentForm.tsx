@@ -1170,17 +1170,17 @@ export function AgentForm(props: Props) {
                 disabled={disabled}
               />
               <Label htmlFor="split_messages">
-                {t("Responder em várias mensagens curtas (como uma pessoa digita)")}
+                {t("Dividir respostas longas em mensagens")}
               </Label>
             </div>
             <p className="text-xs text-muted-foreground">
               {t(
-                "Em vez de um bloco único, a resposta sai em bolhas separadas, espaçadas pelo mesmo ritmo anti-banimento do envio. O agente também é instruído a escrever em parágrafos curtos.",
+                "Respostas que cabem no tamanho alvo saem em uma mensagem, mesmo com parágrafos. Textos longos são divididos em fronteiras seguras, preservando URLs e frases completas. A pausa entre envios segue o ritmo anti-banimento.",
               )}
             </p>
             {form.split_messages ? (
               <div className="space-y-1">
-                <Label htmlFor="split_max_chars">{t("Tamanho máximo por bolha (80–4000)")}</Label>
+                <Label htmlFor="split_max_chars">{t("Tamanho alvo por mensagem (80–4000)")}</Label>
                 <Input
                   id="split_max_chars"
                   type="number"

@@ -37,8 +37,8 @@ fi
 # Se não estivermos na raiz do projeto, clona e entra nele.
 if [ ! -f "package.json" ]; then
   step "Clonando o repositório DeskcommCRM..."
-  git clone https://github.com/melgarafael/DeskcommCRM.git
-  cd DeskcommCRM
+  git clone https://github.com/schneidermvss/deskcommCRM.git
+  cd deskcommCRM
 fi
 
 if ! command -v pnpm >/dev/null 2>&1; then

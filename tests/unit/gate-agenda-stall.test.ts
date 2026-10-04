@@ -1,3 +1,4 @@
+import { AGENDA_TOOL_NAMES } from "@/lib/agent-engine/agent/agenda-residente";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -65,7 +66,10 @@ const FRASE_MEDIDA_2 =
 describe("agendaStallGate — veta a promessa vazia, nunca a checagem de verdade", () => {
   it("veta a frase medida em produção quando armado e a ferramenta não rodou", () => {
     const v = agendaStallGate.evaluate(
-      baseCtx({ agenda: { active: true, ferramentas: TODAS, toolCalledThisTurn: false }, body: FRASE_MEDIDA_1 }),
+      baseCtx({
+        agenda: { active: true, ferramentas: TODAS, toolCalledThisTurn: false },
+        body: FRASE_MEDIDA_1,
+      }),
     );
     expect(v.pass).toBe(false);
     if (v.pass) throw new Error("inalcançável");
@@ -74,7 +78,10 @@ describe("agendaStallGate — veta a promessa vazia, nunca a checagem de verdade
 
   it("veta a segunda frase medida (deferência 'com a equipe')", () => {
     const v = agendaStallGate.evaluate(
-      baseCtx({ agenda: { active: true, ferramentas: TODAS, toolCalledThisTurn: false }, body: FRASE_MEDIDA_2 }),
+      baseCtx({
+        agenda: { active: true, ferramentas: TODAS, toolCalledThisTurn: false },
+        body: FRASE_MEDIDA_2,
+      }),
     );
     expect(v.pass).toBe(false);
   });
@@ -86,14 +93,20 @@ describe("agendaStallGate — veta a promessa vazia, nunca a checagem de verdade
 
   it("agente sem crm_book_appointment (active: false) é no-op mesmo com a frase", () => {
     const v = agendaStallGate.evaluate(
-      baseCtx({ agenda: { active: false, ferramentas: TODAS, toolCalledThisTurn: false }, body: FRASE_MEDIDA_1 }),
+      baseCtx({
+        agenda: { active: false, ferramentas: TODAS, toolCalledThisTurn: false },
+        body: FRASE_MEDIDA_1,
+      }),
     );
     expect(v.pass).toBe(true);
   });
 
   it("a ferramenta JÁ rodou neste turno: a MESMA frase passa — checou de verdade", () => {
     const v = agendaStallGate.evaluate(
-      baseCtx({ agenda: { active: true, ferramentas: TODAS, toolCalledThisTurn: true }, body: FRASE_MEDIDA_1 }),
+      baseCtx({
+        agenda: { active: true, ferramentas: TODAS, toolCalledThisTurn: true },
+        body: FRASE_MEDIDA_1,
+      }),
     );
     expect(v.pass).toBe(true);
   });
@@ -120,8 +133,7 @@ describe("agendaStallGate — veta a promessa vazia, nunca a checagem de verdade
     expect(v.pass).toBe(true);
   });
 
-  const FRASE_CHAMAR_VER =
-    "Vou chamar a responsável pra ver os horários.";
+  const FRASE_CHAMAR_VER = "Vou chamar a responsável pra ver os horários.";
 
   it("veta 'vou chamar a responsável pra ver os horários' sem ferramenta (#970)", () => {
     const v = agendaStallGate.evaluate(
@@ -152,11 +164,20 @@ describe("agendaStallGate — veta a promessa vazia, nunca a checagem de verdade
 
   it.each([
     ["quem vê é o cliente (antes do ver)", "Vou te mandar o link pra você ver a agenda do evento."],
-    ["quem vê é o cliente (depois do ver)", "Estou aqui para ver o que você precisa: agendamento, orçamento ou dúvida?"],
+    [
+      "quem vê é o cliente (depois do ver)",
+      "Estou aqui para ver o que você precisa: agendamento, orçamento ou dúvida?",
+    ],
     ["'a ver' não é checagem", "Vou explicar: isso não tem nada a ver com o seu agendamento."],
-    ["'a ver' não é checagem (ajudar a ver)", "Estou aqui pra te ajudar a ver horários, valores e tratamentos."],
+    [
+      "'a ver' não é checagem (ajudar a ver)",
+      "Estou aqui pra te ajudar a ver horários, valores e tratamentos.",
+    ],
     ["'ver:' é marcador de fala", "Vamos ver: horário de funcionamento é das 8h às 18h."],
-    ["o substantivo está uma oração adiante", "Vou te explicar como funciona pra ver se faz sentido marcar um horário."],
+    [
+      "o substantivo está uma oração adiante",
+      "Vou te explicar como funciona pra ver se faz sentido marcar um horário.",
+    ],
   ])("não veta quando %s", (_corte, body) => {
     expect(agendaStallGate.evaluate(baseCtx({ agenda: armado, body })).pass).toBe(true);
   });
@@ -232,7 +253,10 @@ describe("agendaStallGate — veta a promessa vazia, nunca a checagem de verdade
 
   it("a razão do veto nomeia as ferramentas de agenda — o modelo precisa saber QUAL chamar", () => {
     const v = agendaStallGate.evaluate(
-      baseCtx({ agenda: { active: true, ferramentas: TODAS, toolCalledThisTurn: false }, body: FRASE_MEDIDA_1 }),
+      baseCtx({
+        agenda: { active: true, ferramentas: TODAS, toolCalledThisTurn: false },
+        body: FRASE_MEDIDA_1,
+      }),
     );
     if (v.pass) throw new Error("inalcançável");
     expect(v.reason).toContain("crm_find_free_slots");
@@ -261,7 +285,10 @@ describe("agendaStallGate — veta a promessa vazia, nunca a checagem de verdade
     // O agente de clínica que só olha a agenda: cobrar dele uma marcação seria
     // pedir o que ele não tem como fazer.
     const v = agendaStallGate.evaluate(
-      baseCtx({ agenda: { active: true, ferramentas: SO_CONSULTA, toolCalledThisTurn: false }, body: FRASE_MEDIDA_1 }),
+      baseCtx({
+        agenda: { active: true, ferramentas: SO_CONSULTA, toolCalledThisTurn: false },
+        body: FRASE_MEDIDA_1,
+      }),
     );
     if (v.pass) throw new Error("inalcançável");
     expect(v.reason).toContain("crm_find_free_slots");
@@ -280,7 +307,10 @@ describe("agendaStallGate — veta a promessa vazia, nunca a checagem de verdade
       ferramentas: ["crm_find_free_slots", "crm_find_and_book_appointment"],
       toolCalledThisTurn: false,
     };
-    for (const body of [FRASE_MEDIDA_1, "Perfeito! Seu agendamento está confirmado para amanhã às 9h."]) {
+    for (const body of [
+      FRASE_MEDIDA_1,
+      "Perfeito! Seu agendamento está confirmado para amanhã às 9h.",
+    ]) {
       const v = agendaStallGate.evaluate(baseCtx({ agenda, body }));
       if (v.pass) throw new Error("inalcançável");
       expect(v.reason).toContain("crm_find_and_book_appointment");
@@ -327,11 +357,14 @@ describe("fiação do gate — a EXECUÇÃO da ferramenta de agenda arma o sinal
   });
 
   it("as três tools de agenda são marcadas na montagem — não só crm_book_appointment", () => {
-    expect(FONTE_INBOUND).toMatch(/AGENDA_TOOL_NAMES = new Set\(\[/);
-    expect(FONTE_INBOUND).toContain("'crm_find_free_slots'");
-    expect(FONTE_INBOUND).toContain("'crm_book_appointment'");
-    expect(FONTE_INBOUND).toContain("'crm_reschedule_appointment'");
-    expect(FONTE_INBOUND).toContain("'crm_find_and_book_appointment'");
+    expect([...AGENDA_TOOL_NAMES]).toEqual([
+      "crm_find_free_slots",
+      "crm_book_appointment",
+      "crm_reschedule_appointment",
+      "crm_find_and_book_appointment",
+    ]);
+    expect(FONTE_INBOUND).toContain("from './agenda-residente'");
+    expect(FONTE_INBOUND).toContain("AGENDA_TOOL_NAMES.has(name)");
     expect(FONTE_INBOUND).toMatch(/agendaToolCalledThisTurn = true/);
   });
 });

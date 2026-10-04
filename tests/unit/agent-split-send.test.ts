@@ -85,7 +85,7 @@ describe("sendInBubbles", () => {
     const send = vi.fn(async (_b: string) => ({ kind: "sent", messageId: "m" }));
     await sendInBubbles(seteParagrafos.join("\n\n"), {
       enabled: true,
-      maxChars: 600,
+      maxChars: 10,
       maxBubbles: 3,
       send,
       sleep: async () => undefined,

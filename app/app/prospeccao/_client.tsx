@@ -1,5 +1,10 @@
 "use client";
 
+import { copyToClipboard } from "@/lib/clipboard";
+import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
+
+import { useT } from "@/lib/i18n/IdiomaProvider";
+
 import { useState } from "react";
 import { toast } from "sonner";
 import Markdown, { type Components } from "react-markdown";
@@ -40,15 +45,22 @@ interface ProspeccaoResult {
  * e reescrever o tema do plugin seria mais código do que estes overrides.
  */
 const markdownComponents: Components = {
-  h1: ({ children }) => <h3 className="mb-2 mt-4 text-base font-semibold first:mt-0">{children}</h3>,
-  h2: ({ children }) => <h4 className="mb-2 mt-4 text-sm font-semibold first:mt-0">{children}</h4>,
-  h3: ({ children }) => <h5 className="mb-1 mt-3 text-sm font-medium first:mt-0">{children}</h5>,
+  h1: ({ children }) => (
+    <h3 className="mt-4 mb-2 text-base font-semibold first:mt-0">{children}</h3>
+  ),
+  h2: ({ children }) => <h4 className="mt-4 mb-2 text-sm font-semibold first:mt-0">{children}</h4>,
+  h3: ({ children }) => <h5 className="mt-3 mb-1 text-sm font-medium first:mt-0">{children}</h5>,
   p: ({ children }) => <p className="mb-2 text-sm leading-relaxed last:mb-0">{children}</p>,
   ul: ({ children }) => <ul className="mb-2 list-disc space-y-1 pl-5 text-sm">{children}</ul>,
   ol: ({ children }) => <ol className="mb-2 list-decimal space-y-1 pl-5 text-sm">{children}</ol>,
   li: ({ children }) => <li className="leading-relaxed">{children}</li>,
   a: ({ children, href }) => (
-    <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline underline-offset-2">
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-accent underline underline-offset-2"
+    >
       {children}
     </a>
   ),
@@ -71,20 +83,25 @@ const markdownComponents: Components = {
   tr: ({ children }) => <tr className="last:[&>td]:border-b-0">{children}</tr>,
 };
 
-function copiar(texto: string) {
-  navigator.clipboard
-    .writeText(texto)
-    .then(() => toast.success("Comando copiado."))
-    .catch(() => toast.error("Não consegui copiar — selecione e copie manualmente."));
+async function copiar(texto: string) {
+  if (await copyToClipboard(texto)) {
+    toast.success("Comando copiado.");
+  } else {
+    toast.error("Não consegui copiar — selecione e copie manualmente.");
+  }
 }
 
 const SQUAD_PADRAO = "prospeccao-canoas-poa";
 
 function AbaAgentes() {
+  const t = useT();
   return (
     <div className="flex flex-col gap-3">
       {AGENTES_DO_SQUAD.map((agente) => (
-        <div key={agente.ordem} className="flex gap-4 rounded-lg border border-border bg-surface p-4">
+        <div
+          key={agente.ordem}
+          className="flex gap-4 rounded-lg border border-border bg-surface p-4"
+        >
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-accent">
             {agente.ordem}
           </div>
@@ -101,14 +118,17 @@ function AbaAgentes() {
                     : "bg-accent-soft text-accent")
                 }
               >
-                {agente.execucao === "assincrona" ? "assíncrona" : "inline"}
+                {agente.execucao === "assincrona" ? t("assíncrona") : "inline"}
               </span>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">{agente.descricao}</p>
             {agente.skills && (
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {agente.skills.map((skill) => (
-                  <code key={skill} className="rounded-sm bg-surface-elevated px-1.5 py-0.5 text-xs">
+                  <code
+                    key={skill}
+                    className="rounded-sm bg-surface-elevated px-1.5 py-0.5 text-xs"
+                  >
                     {skill}
                   </code>
                 ))}
@@ -129,6 +149,7 @@ const BOTOES_RAPIDOS = [
 ];
 
 function AbaComandos() {
+  const t = useT();
   const [tipo, setTipo] = useState<"run" | "edit">("run");
   const [squad, setSquad] = useState(SQUAD_PADRAO);
   const [pedido, setPedido] = useState("");
@@ -143,7 +164,7 @@ function AbaComandos() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h3 className="mb-2 text-sm font-medium text-muted-foreground">Atalhos</h3>
+        <h3 className="mb-2 text-sm font-medium text-muted-foreground">{t("Atalhos")}</h3>
         <div className="flex flex-wrap gap-2">
           {BOTOES_RAPIDOS.map((b) => (
             <Button key={b.label} variant="secondary" size="sm" onClick={() => copiar(b.comando)}>
@@ -172,13 +193,15 @@ function AbaComandos() {
               value={squad}
               onChange={(e) => setSquad(e.target.value)}
               placeholder="nome do squad"
-              className="h-10 flex-1 rounded-sm border border-border bg-bg px-3 text-sm text-text placeholder:text-text-muted focus-visible:outline-hidden focus-visible:border-accent-500 focus-visible:ring-2 focus-visible:ring-accent-soft"
+              className="h-10 flex-1 rounded-sm border border-border bg-bg px-3 text-sm text-text placeholder:text-text-muted focus-visible:border-accent-500 focus-visible:ring-2 focus-visible:ring-accent-soft focus-visible:outline-hidden"
             />
           </div>
           <Textarea
             value={pedido}
             onChange={(e) => setPedido(e.target.value)}
-            placeholder="Solicitação livre (usada em 'edit' — ex.: incluir bairro Passo D'Areia no raio de busca)"
+            placeholder={t(
+              "Solicitação livre (usada em 'edit' — ex.: incluir bairro Passo D'Areia no raio de busca)",
+            )}
             rows={3}
           />
           <div>
@@ -188,7 +211,7 @@ function AbaComandos() {
 
         {gerado && (
           <div className="mt-4 flex items-center gap-2 rounded-md border border-border bg-surface-elevated px-3 py-2">
-            <code className="flex-1 overflow-x-auto whitespace-pre text-sm">{gerado}</code>
+            <code className="flex-1 overflow-x-auto text-sm whitespace-pre">{gerado}</code>
             <Button variant="ghost" size="sm" onClick={() => copiar(gerado)}>
               Copiar
             </Button>
@@ -197,8 +220,9 @@ function AbaComandos() {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Esta aba só monta o texto do comando — copie e cole no Claude Code rodando localmente. Nada aqui
-        chama o squad.
+        {t(
+          "Esta aba só monta o texto do comando — copie e cole no Claude Code rodando localmente. Nada aqui chama o squad.",
+        )}
       </p>
     </div>
   );
@@ -211,10 +235,12 @@ function AbaResultados({
   runs: ProspeccaoRun[];
   resultsByRun: Map<string, ProspeccaoResult[]>;
 }) {
+  const t = useT();
+  const tagDoIdioma = useTagDeIdioma();
   if (runs.length === 0) {
     return (
       <div className="rounded-lg border border-border bg-surface p-8 text-center text-sm text-muted-foreground">
-        Nenhuma execução sincronizada ainda.
+        {t("Nenhuma execução sincronizada ainda.")}
       </div>
     );
   }
@@ -227,7 +253,7 @@ function AbaResultados({
             <div>
               <h2 className="text-lg font-semibold">{run.tema ?? run.run_id}</h2>
               <p className="text-xs text-muted-foreground">
-                {run.run_id} · {new Date(run.created_at).toLocaleString("pt-BR")}
+                {run.run_id} · {new Date(run.created_at).toLocaleString(tagDoIdioma)}
               </p>
             </div>
             {run.resultado && (
@@ -238,7 +264,9 @@ function AbaResultados({
           </div>
 
           {(resultsByRun.get(run.run_id) ?? []).length === 0 ? (
-            <p className="text-sm text-muted-foreground">Sem arquivos de resultado nesta execução.</p>
+            <p className="text-sm text-muted-foreground">
+              {t("Sem arquivos de resultado nesta execução.")}
+            </p>
           ) : (
             (resultsByRun.get(run.run_id) ?? []).map((file) => (
               <details key={file.id} className="mb-3 last:mb-0" open>

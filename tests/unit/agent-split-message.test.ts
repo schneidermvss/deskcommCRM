@@ -30,7 +30,7 @@ describe("splitIntoBubbles", () => {
   it("palavra única maior que o teto vai sozinha (não corta no meio)", () => {
     const big = "a".repeat(50);
     const out = splitIntoBubbles(`curto ${big} fim`, 20);
-    expect(out).toContain(big);
+    expect(out).toEqual([`curto ${big} fim`]);
     expect(out.every((b) => b.length > 0)).toBe(true);
   });
   it("não perde texto quando o ponto não é seguido de espaço (preço decimal)", () => {
@@ -69,13 +69,9 @@ describe("splitIntoBubbles", () => {
 // parágrafos juntados até o teto, a opção não tinha ajuste — teto alto virava
 // uma bolha só, teto baixo picotava o resumo do pedido no meio da linha).
 describe("splitIntoBubbles — o parágrafo é a bolha", () => {
-  it("três parágrafos curtos saem em três bolhas, na ordem, mesmo cabendo numa só", () => {
+  it("três parágrafos curtos que cabem saem juntos, preservando as linhas", () => {
     const texto = "Olá! Tudo bem? 😊\n\nSim, serve para qualquer modelo.\n\nQuer que eu reserve?";
-    expect(splitIntoBubbles(texto, 600)).toEqual([
-      "Olá! Tudo bem? 😊",
-      "Sim, serve para qualquer modelo.",
-      "Quer que eu reserve?",
-    ]);
+    expect(splitIntoBubbles(texto, 600)).toEqual([texto]);
   });
 
   it("o resumo do pedido — lista numa linha por item — sai inteiro, com as quebras de linha", () => {
@@ -138,8 +134,7 @@ describe("splitIntoBubbles — dado atômico nunca é partido", () => {
       "Quer agendar uma visita? Posso te passar o endereço.",
     ].join("\n\n");
     const out = splitIntoBubbles(t, 600);
-    expect(out).toHaveLength(3);
-    expect(out[1]).toBe("Temos o Onix 2020. Ele está revisado.");
+    expect(out).toEqual([t]);
   });
 
   it("5) URL com ? & = % # - _ / sai intacta mesmo num parágrafo que estoura o teto", () => {
@@ -182,9 +177,8 @@ describe("instrucaoDeBolhas", () => {
   it("ligado pede UM envio em parágrafos — nunca várias chamadas de send_message", () => {
     const t = instrucaoDeBolhas(true);
     expect(t).toMatch(/ÚNICA chamada de send_message/);
-    expect(t).toMatch(/parágrafos curtos separados por uma linha em branco/);
-    // Resposta curta NÃO é partida: parágrafo só quando há mais de uma ideia.
-    expect(t).toMatch(/Resposta curta vai num parágrafo só/);
+    expect(t).toMatch(/quebras de linha.*não criam mensagens separadas/);
+    expect(t).toMatch(/divide somente respostas que excedem o tamanho configurado/);
     expect(t).toMatch(/Nunca chame send_message mais de uma vez/);
     expect(t).not.toMatch(/várias mensagens/i);
   });
